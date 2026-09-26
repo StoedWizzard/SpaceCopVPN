@@ -1,0 +1,229 @@
+"""The VPN client: connects to several competing nodes and relays through them.
+
+The client holds a pseudonymous Ed25519 identity used only to sign
+proof-of-relay receipts.  It maintains encrypted sessions to multiple nodes at
+once, and for each request it picks a node (see :mod:`.multipath`) — nodes
+compete to serve traffic, and the client rewards the one that does the work
+with a signed receipt.  Requests are fragmented into 20 KB pieces, shuffled,
+and encrypted before they hit the wire; replies are reassembled locally.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+from ..crypto import ed25519
+from ..fragmentation import Fragmenter, Reassembler
+from ..protocol import ClientHandshake, Session, constants as c, framing
+from ..protocol.messages import (
+    DataMessage,
+    PeerList,
+    Receipt,
+    RelayRequest,
+    RelayResponse,
+)
+from ..transport import Address, UDPTransport
+from .multipath import NodeConnection, NodeSelector
+
+
+class RelayTimeout(Exception):
+    pass
+
+
+@dataclass
+class _PendingHandshake:
+    handshake: ClientHandshake
+    addr: Address
+    event: threading.Event = field(default_factory=threading.Event)
+    session: Optional[Session] = None
+
+
+@dataclass
+class _PendingRequest:
+    event: threading.Event = field(default_factory=threading.Event)
+    response: Optional[RelayResponse] = None
+
+
+class VPNClient:
+    def __init__(self, bind_host: str = "0.0.0.0", bind_port: int = 0):
+        self.ed_private, self.ed_public = ed25519.generate_keypair()
+        self.transport = UDPTransport(bind_host, bind_port)
+        self.transport.set_handler(self._on_datagram)
+        self.fragmenter = Fragmenter()
+
+        self._connections: Dict[bytes, NodeConnection] = {}  # session_id -> conn
+        self._reassemblers: Dict[bytes, Reassembler] = {}
+        self._pending_handshakes: Dict[bytes, _PendingHandshake] = {}
+        self._pending_requests: Dict[bytes, _PendingRequest] = {}
+        self._selector = NodeSelector()
+        self._lock = threading.Lock()
+        self._receipt_seq = 0
+
+    def start(self) -> None:
+        self.transport.start()
+
+    def stop(self) -> None:
+        self.transport.stop()
+
+    # -- connection establishment ------------------------------------------
+    def connect(self, node_x_public: bytes, addr: Address,
+                expected_node_ed: bytes = b"", timeout: float = 5.0) -> NodeConnection:
+        """Perform a handshake with a node and register the resulting session."""
+        handshake = ClientHandshake(node_x_public, expected_node_ed_pub=expected_node_ed)
+        pending = _PendingHandshake(handshake=handshake, addr=addr)
+        with self._lock:
+            self._pending_handshakes[handshake.session_id] = pending
+        self.transport.send(handshake.build_init(), addr)
+
+        if not pending.event.wait(timeout):
+            with self._lock:
+                self._pending_handshakes.pop(handshake.session_id, None)
+            raise RelayTimeout("handshake timed out")
+
+        session = pending.session
+        conn = NodeConnection(session=session, addr=addr,
+                              node_ed_public=session.peer_identity)
+        with self._lock:
+            self._connections[session.session_id] = conn
+            self._reassemblers[session.session_id] = Reassembler()
+            self._selector.add(conn)
+        return conn
+
+    # -- relaying -----------------------------------------------------------
+    def relay(self, dest_host: str, dest_port: int, blob: bytes,
+              via: Optional[NodeConnection] = None, timeout: float = 10.0,
+              issue_receipt: bool = True) -> bytes:
+        """Send ``blob`` to (dest_host, dest_port) through a node; return the reply.
+
+        If ``via`` is None the client lets the selector pick a competing node.
+        On success it signs and sends a proof-of-relay receipt to that node.
+        """
+        conn = via or self._selector.choose()
+        if conn is None:
+            raise RelayTimeout("no node connections available")
+
+        request_id = os.urandom(8)
+        pending = _PendingRequest()
+        with self._lock:
+            self._pending_requests[request_id] = pending
+
+        req = RelayRequest(request_id, dest_host, dest_port, blob).encode()
+        started = time.monotonic()
+        self._send_app_message(conn, req)
+
+        if not pending.event.wait(timeout):
+            with self._lock:
+                self._pending_requests.pop(request_id, None)
+            self._selector.record_failure(conn)
+            raise RelayTimeout("relay request timed out")
+
+        elapsed = time.monotonic() - started
+        resp = pending.response
+        with self._lock:
+            self._pending_requests.pop(request_id, None)
+
+        relayed = len(blob) + len(resp.blob)
+        self._selector.record_success(conn, elapsed, relayed)
+        if issue_receipt and conn.node_ed_public:
+            self._send_receipt(conn, relayed)
+        if resp.status != 0:
+            raise RelayTimeout(f"relay failed with status {resp.status}: {resp.blob!r}")
+        return resp.blob
+
+    def _send_receipt(self, conn: NodeConnection, byte_count: int) -> None:
+        with self._lock:
+            self._receipt_seq += 1
+            seq = self._receipt_seq
+        receipt = Receipt(
+            client_ed_public=self.ed_public,
+            node_ed_public=conn.node_ed_public,
+            seq=seq,
+            byte_count=byte_count,
+            timestamp=int(time.time()),
+        ).sign(self.ed_private)
+        try:
+            self.transport.send(receipt.encode(), conn.addr)
+        except OSError:
+            pass
+
+    def _send_app_message(self, conn: NodeConnection, inner_frame: bytes) -> None:
+        for raw in self.fragmenter.fragment_encoded(inner_frame, shuffle=True):
+            sealed = conn.session.seal(raw)
+            datagram = DataMessage(conn.session.session_id, sealed).encode()
+            self.transport.send(datagram, conn.addr)
+
+    # -- receive path -------------------------------------------------------
+    def _on_datagram(self, data: bytes, addr: Address) -> None:
+        try:
+            msg_type, body = framing.decode_frame(data)
+        except framing.ProtocolError:
+            return
+        if msg_type == c.MSG_HANDSHAKE_RESP:
+            self._handle_handshake_resp(body)
+        elif msg_type == c.MSG_DATA:
+            self._handle_data(body)
+        elif msg_type == c.MSG_PEER_LIST:
+            self._handle_peer_list(body)
+
+    def _handle_handshake_resp(self, body: bytes) -> None:
+        if len(body) < 8:
+            return
+        session_id = body[:8]
+        with self._lock:
+            pending = self._pending_handshakes.pop(session_id, None)
+        if pending is None:
+            return
+        try:
+            pending.session = pending.handshake.consume_response(body)
+        except Exception:
+            pending.session = None
+        pending.event.set()
+
+    def _handle_data(self, body: bytes) -> None:
+        try:
+            dm = DataMessage.decode(body)
+        except framing.ProtocolError:
+            return
+        with self._lock:
+            conn = self._connections.get(dm.session_id)
+            reasm = self._reassemblers.get(dm.session_id)
+        if conn is None or reasm is None:
+            return
+        try:
+            fragment_bytes = conn.session.open(dm.sealed)
+            completed = reasm.add_bytes(fragment_bytes)
+        except Exception:
+            return
+        if completed is not None:
+            self._handle_app_message(completed)
+
+    def _handle_app_message(self, plaintext: bytes) -> None:
+        try:
+            msg_type, inner = framing.decode_frame(plaintext)
+        except framing.ProtocolError:
+            return
+        if msg_type == c.MSG_RELAY_RESPONSE:
+            try:
+                resp = RelayResponse.decode(inner)
+            except framing.ProtocolError:
+                return
+            with self._lock:
+                pending = self._pending_requests.get(resp.request_id)
+            if pending is not None:
+                pending.response = resp
+                pending.event.set()
+
+    def _handle_peer_list(self, body: bytes) -> None:
+        try:
+            PeerList.decode(body)
+        except framing.ProtocolError:
+            return
+
+    # -- introspection ------------------------------------------------------
+    def connections(self) -> List[NodeConnection]:
+        with self._lock:
+            return list(self._connections.values())

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spacecopvpn"
+version = "0.1.0"
+description = "A from-scratch, decentralised, incentivised VPN protocol (stdlib only)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["vpn", "networking", "protocol", "decentralized", "cryptography"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Networking",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = []  # standard library only, by design
+
+[project.scripts]
+spacecop = "spacecop.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/stoedwizzard/spacecopvpn"
+
+[tool.setuptools.packages.find]
+include = ["spacecop*"]
