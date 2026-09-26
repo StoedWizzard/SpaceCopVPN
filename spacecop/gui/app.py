@@ -191,15 +191,16 @@ class RoundedEntry(tk.Canvas):
         self.tag_lower(self._shape)
         self.itemconfigure(self._win, width=w - 20)
 
-    # Entry-like API
-    def get(self):
+    # Text API.  NOTE: never override Canvas.delete/insert here — the canvas
+    # calls self.delete(item_id) when it redraws its own shape, and a proxy to
+    # the Entry would delete characters from the text instead (that bug once
+    # turned "1.1.1.1:53" into "1...:3").
+    def get(self) -> str:
         return self.entry.get()
 
-    def delete(self, *a):
-        return self.entry.delete(*a)
-
-    def insert(self, *a):
-        return self.entry.insert(*a)
+    def set(self, text: str) -> None:
+        self.entry.delete(0, "end")
+        self.entry.insert(0, text)
 
 
 def apply_theme(root: tk.Tk) -> ttk.Style:
@@ -518,8 +519,7 @@ class App:
                                     (self.e_port, "listen_port", 1080),
                                     (self.e_test, "test_target", "example.com:80"),
                                     (self.e_dns, "dns", "1.1.1.1:53")):
-            entry.delete(0, "end")
-            entry.insert(0, str(prof.get(key, default)))
+            entry.set(str(prof.get(key, default)))
         self.var_discover.set(bool(prof.get("discover", True)))
         self.var_mode.set(prof.get("mode", "socks") if sys.platform.startswith("linux") else "socks")
 
@@ -590,7 +590,7 @@ class App:
             messagebox.showinfo(APP_TITLE, "Этот узел уже добавлен.")
             return
         self.lb_nodes.insert("end", text)
-        self.e_uri.delete(0, "end")
+        self.e_uri.set("")
         self._log("Узел добавлен. Не забудьте «Сохранить».")
 
     def _remove_node(self) -> None:

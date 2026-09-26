@@ -32,4 +32,4 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run engine tests on a real TUN interface
-        run: sudo -E "$(command -v python)" -m unittest tests.test_engine_tun -v
+        run: sudo -E "$(command -v python)" -m unittest discover -s tests -p "test_engine_tun.py" -v

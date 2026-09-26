@@ -372,6 +372,7 @@ class PacketEngine:
         self.tcp_opened = 0
         self.tcp_failed = 0
         self.dns_queries = 0
+        self._last_dns_error = 0.0
         self.bytes_up = 0
         self.bytes_down = 0
 
@@ -537,7 +538,13 @@ class PacketEngine:
         try:
             stream = self.client.open_stream(self.dns_server[0], self.dns_server[1], timeout=10.0)
         except Exception as exc:
-            self._emit(f"dns: cannot reach resolver through the tunnel: {exc}")
+            # One line per few seconds, not one per query: a resolver outage
+            # would otherwise flood the log with identical messages.
+            now = time.monotonic()
+            if now - self._last_dns_error > 5.0:
+                self._last_dns_error = now
+                self._emit(f"dns: cannot reach resolver {self.dns_server[0]}:{self.dns_server[1]} "
+                           f"through the tunnel: {exc}")
             return
         try:
             stream.send(struct.pack("!H", len(query)) + query)
