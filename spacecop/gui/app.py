@@ -34,6 +34,11 @@ from ..protocol.uri import URIError, parse_uri
 from ..tun.socks_proxy import Socks5Proxy
 
 APP_TITLE = "SpaceCopVPN"
+
+
+def _not_root() -> bool:
+    """True when we lack root; on platforms without geteuid (Windows) always True."""
+    return getattr(os, "geteuid", lambda: 1)() != 0
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "spacecop")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "profiles.json")
 
@@ -762,7 +767,7 @@ class App:
         self._post("connected_socks", (client, proxy, ok))
 
     def _connect_system_worker(self, prof: dict) -> None:
-        if shutil.which("pkexec") is None and os.geteuid() != 0:
+        if shutil.which("pkexec") is None and _not_root():
             self._post("connect_failed", "для режима «Вся система» нужен pkexec (polkit) или запуск от root")
             return
         cmd = [sys.executable, "-m", "spacecop.cli", "vpn", "--dns", prof.get("dns", "1.1.1.1:53"),
@@ -771,7 +776,7 @@ class App:
             cmd.append("--no-discover")
         for uri in prof["nodes"]:
             cmd += ["--uri", uri]
-        if os.geteuid() != 0:
+        if _not_root():
             pypath = os.pathsep.join([p for p in sys.path if p and ("site-packages" in p or "dist-packages" in p)]
                                      + [os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))])
             cmd = ["pkexec", "env", f"PYTHONPATH={pypath}"] + cmd

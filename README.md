@@ -95,6 +95,13 @@ spacecop://203.0.113.9:51820/<x25519_hex>/<ed25519_hex>
 Update a running node later with `sudo ./deploy/update_server.sh` (the service
 runs from `/opt/spacecop`, so a `git pull` elsewhere does not update it).
 
+### Windows
+
+Download `SpaceCopVPN.exe` from the latest Release (or the `SpaceCopVPN-windows`
+artifact of the "Windows app" workflow), run it, paste a URI, connect in
+SOCKS5 mode and point Windows' proxy settings at `127.0.0.1:1080`. Built by
+PyInstaller in CI; no install needed. See `packaging/windows/README.md`.
+
 ### Graphical client (Arch Linux)
 
 ```

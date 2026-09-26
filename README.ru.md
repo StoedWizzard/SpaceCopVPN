@@ -93,6 +93,14 @@ spacecop://203.0.113.9:51820/<x25519-ключ>/<ed25519-идентификато
 Обновить работающий узел: `sudo ./deploy/update_server.sh` (служба работает из
 `/opt/spacecop`, поэтому `git pull` в другом каталоге узел не обновляет).
 
+### Windows
+
+Скачайте `SpaceCopVPN.exe` из последнего Release (или артефакт
+`SpaceCopVPN-windows` workflow «Windows app»), запустите, вставьте строку
+подключения, подключитесь в режиме SOCKS5 и укажите в настройках прокси
+Windows `127.0.0.1:1080`. Собирается PyInstaller в CI, установка не нужна.
+Подробнее — `packaging/windows/README.md`.
+
 ### Клиент с интерфейсом (Arch Linux)
 
 ```

@@ -1,0 +1,79 @@
+name: Windows app
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "spacecop/**"
+      - "packaging/windows/**"
+      - "pyproject.toml"
+      - ".github/workflows/windows.yml"
+  pull_request:
+    paths:
+      - "spacecop/**"
+      - "packaging/windows/**"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build SpaceCopVPN.exe
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Build GUI (SpaceCopVPN.exe) and CLI (spacecop.exe)
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name SpaceCopVPN `
+            --collect-submodules spacecop `
+            packaging/windows/spacecop_gui_entry.py
+          pyinstaller --noconfirm --clean --onefile --console --name spacecop `
+            --collect-submodules spacecop `
+            packaging/windows/spacecop_cli_entry.py
+          Get-ChildItem dist
+
+      - name: Smoke test the CLI build
+        shell: pwsh
+        run: |
+          .\dist\spacecop.exe --version
+          .\dist\spacecop.exe --help | Select-Object -First 5
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $ref = "$env:GITHUB_REF_NAME" -replace '/', '-'
+          Copy-Item dist\SpaceCopVPN.exe out\SpaceCopVPN.exe
+          Copy-Item dist\spacecop.exe out\spacecop.exe
+          Copy-Item packaging\windows\README.md out\README.txt
+          Compress-Archive -Path out\* -DestinationPath "SpaceCopVPN-windows-$ref.zip" -Force
+          Get-ChildItem .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpaceCopVPN-windows
+          path: SpaceCopVPN-windows-*.zip
+          retention-days: 30
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            SpaceCopVPN-windows-*.zip
+            out/SpaceCopVPN.exe
+          generate_release_notes: true
