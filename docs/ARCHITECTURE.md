@@ -86,6 +86,37 @@ nodes and load-balances requests across them with an epsilon-greedy,
 latency-and-reliability-weighted selector, so faster/steadier nodes win more
 traffic (and thus more points).
 
+## Whole system: a from-scratch TCP/IP stack over TUN
+
+A virtual interface (Linux TUN, Android `VpnService`) yields raw IP packets,
+while the overlay carries TCP streams. Bridging them is
+`spacecop/tun/engine.py`, a small userspace TCP/IP stack (what tun2socks does)
+written from scratch:
+
+* **TCP.** For every connection an application opens, the engine plays the
+  remote host: answers the SYN with SYN-ACK immediately (fast connects), acks
+  data, honours the app's window, retransmits segments the app did not ack,
+  sends FIN/RST. Payload goes through `open_stream()` to the real destination;
+  if the node cannot connect, the app gets an RST. Threads: one TUN reader,
+  plus per connection an "uplink" (app → stream, blocks on the stream window)
+  and a "downlink" (stream → segments).
+* **DNS.** UDP to port 53 is intercepted; the query goes through the tunnel as
+  DNS-over-TCP to the resolver (1.1.1.1 by default) and the answer comes back
+  as a UDP packet. No DNS leaks.
+* **ICMP.** Echo requests to the tunnel gateway are answered.
+* Other UDP and IPv6 are not carried (documented).
+
+The Linux controller `spacecop/tun/system.py` creates `spacecop0`, configures
+address and routes through ioctls (no iproute2 needed), steals the default
+route with `0.0.0.0/1` + `128.0.0.0/1`, keeps host routes to nodes via the real
+gateway (adding them for auto-discovered nodes), switches DNS, and restores
+everything on stop. The GUI runs it via `pkexec` and stops it with a `stop`
+line on stdin. The Android app hands the `VpnService` fd to `run_engine()`.
+
+Live tests on a real TUN (`tests/test_engine_tun.py`, root required): a
+15-exchange dialogue, a 600 KB download, 40 parallel connections, a DNS query
+through the tunnel, RST on an unreachable destination.
+
 ## Cross-platform device integration
 
 The protocol core is platform-agnostic pure Python. Capturing device traffic is

@@ -22,10 +22,20 @@ DatagramHandler = Callable[[bytes, Address], None]
 # this is fine; see docs/ARCHITECTURE.md for the production note on MTU.
 MAX_DATAGRAM = 65535
 
+# Called with the new socket's file descriptor right after creation.  Android's
+# VpnService uses it to protect() the tunnel's own UDP socket so its packets to
+# the nodes are not routed back into the tunnel.
+socket_created_hook: Optional[Callable[[int], None]] = None
+
 
 class UDPTransport:
     def __init__(self, bind_host: str = "0.0.0.0", bind_port: int = 0):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if socket_created_hook is not None:
+            try:
+                socket_created_hook(self._sock.fileno())
+            except Exception:
+                pass
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 21)

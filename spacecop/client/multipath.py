@@ -60,11 +60,16 @@ def site_key(host: str) -> str:
     return ".".join(labels[-2:])
 
 
+MIN_LATENCY = 0.005   # 5 ms floor: keeps health finite and comparable
+HEALTH_CAP = 100.0    # health = reliability / latency, capped for display sanity
+
+
 @dataclass(eq=False)  # identity semantics: usable in sets, compared by object
 class NodeConnection:
     session: Session
     addr: Address
     node_ed_public: bytes = b""
+    x_public: bytes = b""      # node's X25519 key (lets us rebuild its URI)
 
     # Live performance stats used for selection.
     requests: int = 0
@@ -75,11 +80,15 @@ class NodeConnection:
     def node_id_hex(self) -> str:
         return self.node_ed_public.hex()[:16] if self.node_ed_public else "unknown"
 
+    def uri(self) -> str:
+        from ..protocol.uri import build_uri
+        return build_uri(self.addr[0], self.addr[1], self.x_public, self.node_ed_public)
+
     def health_score(self) -> float:
-        """Higher is better. Rewards low latency and penalises failures."""
-        latency = self.ewma_latency if self.ewma_latency > 0 else 0.05
+        """Higher is better (0..100). Rewards low latency, penalises failures."""
+        latency = max(self.ewma_latency, MIN_LATENCY) if self.ewma_latency > 0 else 0.05
         reliability = 1.0 - (self.failures / (self.requests + 1))
-        return reliability / latency
+        return min(HEALTH_CAP, reliability / latency)
 
 
 @dataclass
@@ -160,10 +169,17 @@ class NodeSelector:
             return pin.conn if pin else None
 
     # -- feedback -----------------------------------------------------------
-    def record_success(self, conn: NodeConnection, latency: float, byte_count: int) -> None:
+    def record_success(self, conn: NodeConnection, latency: Optional[float],
+                       byte_count: int) -> None:
+        """``latency`` is a real measured round trip in seconds, or None when
+        the event carries no timing (e.g. a stream closing).  A zero/None value
+        must never feed the average — it would drive it to 0 and health to
+        infinity."""
         with self._lock:
             conn.requests += 1
             conn.bytes_served += byte_count
+            if latency is None or latency <= 0.0:
+                return
             alpha = 0.3
             if conn.ewma_latency == 0.0:
                 conn.ewma_latency = latency

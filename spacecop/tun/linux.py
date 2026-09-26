@@ -37,6 +37,9 @@ class LinuxTun(TunInterface):
             raise
         self.name = result[:_IFNAMSIZ].rstrip(b"\x00").decode("ascii")
 
+    def fileno(self) -> int:
+        return self._fd
+
     def read_packet(self) -> bytes:
         # Read up to MTU + a little slack for any framing.
         return os.read(self._fd, self.mtu + 4)

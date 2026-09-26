@@ -45,6 +45,9 @@ class FileDescriptorTun(TunInterface):
         self.name = name
         self._close_fd = close_fd
 
+    def fileno(self) -> int:
+        return self._fd
+
     def read_packet(self) -> bytes:
         return os.read(self._fd, self.mtu + 4)
 
@@ -57,3 +60,91 @@ class FileDescriptorTun(TunInterface):
                 os.close(self._fd)
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Entry point called from the Android app (Chaquopy)
+# ---------------------------------------------------------------------------
+_active = {}
+
+
+def set_socket_protector(protector) -> None:
+    """Register the VpnService's protect(fd) so the tunnel's own UDP socket
+    bypasses the tunnel.  ``protector`` is any object with ``protectFd(int)``."""
+    from .. import transport
+    from ..transport import udp as _udp
+
+    def hook(fd: int) -> None:
+        try:
+            protector.protectFd(fd)
+        except Exception:
+            pass
+    _udp.socket_created_hook = hook
+
+
+def run_engine(fd: int, uris: list, dns: str = "1.1.1.1:53", discover: bool = True,
+               log=None) -> dict:
+    """Start the VPN on the file descriptor from ``VpnService`` (non-blocking).
+
+    ``uris`` — connection strings ``spacecop://…``.  Returns a dict with a
+    ``stop()`` callable and a ``status()`` callable.  Log lines go to ``log``
+    (a Java/Kotlin callback or Python callable) if given.
+    """
+    from ..client import VPNClient
+    from ..protocol.uri import parse_uri
+    from .engine import PacketEngine
+
+    def emit(text):
+        if log is not None:
+            try:
+                log(text)
+            except Exception:
+                pass
+
+    client = VPNClient(discovery_enabled=discover, on_event=emit)
+    client.start()
+    ok = 0
+    for text in uris:
+        try:
+            t = parse_uri(text)
+            client.connect(t.x_public, t.address, expected_node_ed=t.ed_public, timeout=8.0)
+            ok += 1
+            emit(f"connected to node {t.host}:{t.port}")
+        except Exception as exc:
+            emit(f"node {text[:40]}…: {exc}")
+    if ok == 0:
+        client.stop()
+        raise RuntimeError("no node answered")
+
+    host, _, port = dns.rpartition(":")
+    tun = FileDescriptorTun(fd, mtu=1400, close_fd=False)
+    engine = PacketEngine(tun, client, gateway_ip="10.77.0.1",
+                          dns_server=(host or "1.1.1.1", int(port or 53)), on_event=emit)
+    engine.start()
+    emit("packet engine running")
+
+    def stop():
+        engine.stop()
+        client.stop()
+        _active.pop(fd, None)
+
+    def status():
+        return {
+            "nodes": len(client.connections()),
+            "connections": engine.active_connections(),
+            "opened": engine.tcp_opened,
+            "failed": engine.tcp_failed,
+            "dns": engine.dns_queries,
+            "up": engine.bytes_up,
+            "down": engine.bytes_down,
+        }
+
+    handle = {"stop": stop, "status": status}
+    _active[fd] = handle
+    return handle
+
+
+def stop_engine(fd: int) -> None:
+    handle = _active.get(fd)
+    if handle:
+        handle["stop"]()

@@ -226,7 +226,8 @@ class VPNClient:
                 pending.error or "node response failed verification "
                                  "(wrong key, wrong identity, or tampering)")
         conn = NodeConnection(session=session, addr=addr,
-                              node_ed_public=session.peer_identity)
+                              node_ed_public=session.peer_identity,
+                              x_public=node_x_public)
         with self._lock:
             self._connections[session.session_id] = conn
             self._reassemblers[session.session_id] = Reassembler()
@@ -388,13 +389,15 @@ class VPNClient:
             self._pending_opens[stream_id] = pending
 
         open_frame = StreamOpen(stream_id, dest_host, dest_port).encode()
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
         answered = False
         while time.monotonic() < deadline:
             self._send_app_message(conn, open_frame)  # re-sent until acknowledged
             if pending.event.wait(min(1.0, max(0.05, deadline - time.monotonic()))):
                 answered = True
                 break
+        open_latency = time.monotonic() - started
         with self._lock:
             self._pending_opens.pop(stream_id, None)
         if not answered or pending.status != 0:
@@ -407,7 +410,9 @@ class VPNClient:
                    "node could not connect to the destination: "
                    + pending.text.decode("utf-8", "replace"))
             return None, why
-        self._selector.record_success(conn, 0.0, 0)
+        # Time-to-OPENED is a real round trip through the node (plus its TCP
+        # connect to the destination): a fair latency sample for node ranking.
+        self._selector.record_success(conn, open_latency, 0)
         return stream, None
 
     def _close_client_stream(self, stream: ClientStream, notify_peer: bool) -> None:
@@ -419,7 +424,8 @@ class VPNClient:
             stream.endpoint.on_close()
         carried = stream.endpoint.bytes_sent + stream.endpoint.bytes_received
         if carried > 0 and stream.conn.node_ed_public:
-            self._selector.record_success(stream.conn, 0.0, carried)
+            # No timing here (a stream's lifetime is not a latency): latency=None.
+            self._selector.record_success(stream.conn, None, carried)
             self._send_receipt(stream.conn, carried)
 
     def _stream_ticker(self) -> None:

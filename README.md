@@ -52,9 +52,16 @@ library.
 * **Built for many requests** — nodes relay on a worker pool, lost fragments
   are retransmitted, and responses are cached so a retransmit never hits the
   destination twice. 300 concurrent relays are exercised in the test-suite.
-* **Graphical client + packaging** — a Tkinter GUI (profiles, paste a
-  `spacecop://…` connection URI, SOCKS5, test, node health table), an
-  **Arch Linux** package, and a one-command server installer.
+* **Whole-system VPN, no proxy settings** — a from-scratch userspace TCP/IP
+  stack (`spacecop/tun/engine.py`) takes IP packets from a virtual interface,
+  terminates TCP and carries the bytes as overlay streams; DNS is intercepted
+  and resolved through the tunnel. Linux gets a "whole system" mode (TUN +
+  routes, no iproute2 needed); **Android** gets a `VpnService` app on the same
+  engine (`android/`).
+* **Graphical client + packaging** — a dark, card-based Tkinter GUI (profiles,
+  SOCKS5 or whole-system mode, `spacecop://…` URIs, "Find nodes", "Check
+  node", node health table, log), an **Arch Linux** package, and a
+  one-command server installer.
 
 📖 **Документация на русском: [README.ru.md](README.ru.md), [docs/ru/](docs/ru/).**
 
@@ -105,6 +112,8 @@ python -m spacecop.cli keygen --identity id.json --host <ip>   # keys + URI
 python -m spacecop.cli node --port 51820 --advertise <ip> --identity id.json
 python -m spacecop.cli proxy --uri spacecop://... --listen 127.0.0.1:1080
 python -m spacecop.cli relay --uri spacecop://... --dest example.com:80
+sudo python -m spacecop.cli vpn --uri spacecop://...      # whole system (Linux, TUN)
+python -m spacecop.cli peers --node <ip>:51820            # what a node knows (gossip)
 python -m spacecop.cli gui
 ```
 
@@ -114,13 +123,15 @@ python -m spacecop.cli gui
 python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-89 tests cover the crypto (against RFC 8439/7748/5869 vectors and OpenSSL), the
+101 tests cover the crypto (against RFC 8439/7748/5869 vectors and OpenSSL), the
 handshake and session layer, replay protection, fragmentation and reassembly,
 the scoring ledger and proof-of-work, connection URIs and identity persistence,
 full end-to-end relaying over real UDP/TCP sockets, streaming (multi-round-trip
 dialogues, 700 KB transfers, 120 concurrent streams, a 30%-loss channel, SOCKS5),
-300 concurrent relays under load, one-site-one-node IP consistency, and the
-ping/handshake diagnostics.
+300 concurrent relays under load, one-site-one-node IP consistency, node
+failover, auto-discovery, ping/handshake diagnostics, and **live tests of the
+TCP/IP engine on a real Linux TUN** (dialogue, 600 KB download, 40 parallel
+connections, DNS through the tunnel, RST on unreachable; skipped without root).
 
 ## Layout
 

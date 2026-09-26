@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SpaceCopVPN</string>
+    <string name="status_off">● отключено</string>
+    <string name="status_on">● подключено — весь трафик через VPN</string>
+    <string name="nodes_title">Узлы</string>
+    <string name="nodes_hint">Вставьте строки подключения spacecop://… (по одной на строку). Одного узла достаточно — остальные подтянутся автообнаружением.</string>
+    <string name="discover">Автообнаружение узлов</string>
+    <string name="connect">Подключиться</string>
+    <string name="disconnect">Отключиться</string>
+    <string name="need_uri">Добавьте хотя бы одну строку spacecop://…</string>
+</resources>

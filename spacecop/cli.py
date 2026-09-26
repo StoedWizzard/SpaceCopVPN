@@ -202,6 +202,81 @@ def cmd_ping(args) -> int:
         client.stop()
 
 
+def cmd_vpn(args) -> int:
+    """Full-system mode (Linux, root): TUN + routing, everything through the overlay."""
+    import os
+    import sys as _sys
+
+    if not _sys.platform.startswith("linux"):
+        raise SystemExit("full-system mode is Linux-only for now; use 'proxy' (SOCKS5) elsewhere")
+    if os.geteuid() != 0:
+        raise SystemExit("full-system mode needs root: sudo spacecop vpn ... (or pkexec)")
+    from .tun.system import SystemVPN
+
+    def emit(text):
+        print(f"[vpn] {text}", flush=True)
+
+    client = _connect_client(args)
+    host, _, port = args.dns.rpartition(":")
+    vpn = SystemVPN(client, dns_server=(host or "1.1.1.1", int(port or 53)), on_event=emit)
+    try:
+        vpn.start()
+    except Exception as exc:
+        emit(f"failed to start: {exc}")
+        vpn.stop()
+        client.stop()
+        return 1
+    emit("READY")
+    try:
+        vpn.run_forever(status_every=args.status_interval)
+    finally:
+        client.stop()
+        emit("STOPPED")
+    return 0
+
+
+def cmd_peers(args) -> int:
+    """Ask a node which peers it knows (gossip diagnostics, no handshake needed)."""
+    import socket
+    import threading
+
+    from .protocol import constants as c, framing
+    from .protocol.messages import NodeAnnounce, PeerList, PeerRequest
+
+    host, port = _parse_hostport(args.node)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(args.timeout)
+    sock.sendto(PeerRequest(max_peers=64).encode(), (host, port))
+    peers, announce = None, None
+    deadline = time.time() + args.timeout
+    while time.time() < deadline and (peers is None or announce is None):
+        try:
+            data, _ = sock.recvfrom(65535)
+        except socket.timeout:
+            break
+        try:
+            msg_type, body = framing.decode_frame(data)
+        except framing.ProtocolError:
+            continue
+        if msg_type == c.MSG_PEER_LIST:
+            peers = PeerList.decode(body)
+        elif msg_type == c.MSG_NODE_ANNOUNCE:
+            announce = NodeAnnounce.decode(body)
+    if peers is None:
+        print(f"[peers] {host}:{port}: no PEER_LIST reply (node down, port blocked, or old build)")
+        return 1
+    if announce is not None:
+        print(f"[peers] node {announce.ed_public.hex()[:16]} at {host}:{port} "
+              f"(advertises {announce.host}:{announce.port}, score {announce.score})")
+    print(f"[peers] knows {len(peers.peers)} other node(s):")
+    for p in peers.peers:
+        print(f"    {build_uri(p.host, p.port, p.x_public, p.ed_public)}")
+    if not peers.peers:
+        print("    (none) — other nodes must announce to it: start them with "
+              "--bootstrap host:port of this node, or set SPACECOP_BOOTSTRAP")
+    return 0
+
+
 def cmd_gui(args) -> int:
     from .gui.app import main as gui_main
 
@@ -261,6 +336,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_client_args(p_ping)
     p_ping.add_argument("--timeout", type=float, default=4.0)
     p_ping.set_defaults(func=cmd_ping)
+
+    p_vpn = sub.add_parser("vpn", help="full-system tunnel (Linux, root): TUN + routes, no SOCKS")
+    add_client_args(p_vpn)
+    p_vpn.add_argument("--dns", default="1.1.1.1:53",
+                       help="DNS-over-TCP resolver reached through the tunnel")
+    p_vpn.add_argument("--status-interval", type=float, default=10.0)
+    p_vpn.set_defaults(func=cmd_vpn)
+
+    p_peers = sub.add_parser("peers", help="list the peers a node knows (gossip check)")
+    p_peers.add_argument("--node", required=True, help="node host:port")
+    p_peers.add_argument("--timeout", type=float, default=4.0)
+    p_peers.set_defaults(func=cmd_peers)
 
     p_gui = sub.add_parser("gui", help="launch the graphical client")
     p_gui.set_defaults(func=cmd_gui)
