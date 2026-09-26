@@ -55,6 +55,7 @@ class _PendingHandshake:
 class _PendingPing:
     event: threading.Event = field(default_factory=threading.Event)
     rtt: float = 0.0
+    version: str = ""  # node software version from the PONG ("" = old node)
 
 
 @dataclass
@@ -345,7 +346,9 @@ class VPNClient:
             with self._lock:
                 self._streams.pop(stream_id, None)
             self._selector.record_failure(conn, dest_host)
-            why = "no answer from node" if not answered else pending.text.decode("utf-8", "replace")
+            why = ("no answer from node (an outdated node build ignores stream messages; "
+                   "update the server: deploy/update_server.sh)"
+                   if not answered else pending.text.decode("utf-8", "replace"))
             raise RelayTimeout(f"stream open to {dest_host}:{dest_port} failed: {why}")
         self._selector.record_success(conn, 0.0, 0)
         return stream
@@ -402,6 +405,16 @@ class VPNClient:
         or clock check — so "no PONG" means the node is down or the UDP port
         is not reachable, and "PONG but handshake fails" points at keys/clock.
         """
+        rtt, _version = self.probe(addr, timeout=timeout, attempts=attempts)
+        return rtt
+
+    def probe(self, addr: Address, timeout: float = 3.0, attempts: int = 3):
+        """Like :meth:`ping` but also return the node's software version.
+
+        Returns ``(rtt_seconds_or_None, version_string)``.  An empty version
+        with a successful PONG means the node runs an old build (before
+        0.2.0) that does not support streams and must be updated.
+        """
         token = os.urandom(8)
         pending = _PendingPing()
         with self._lock:
@@ -412,8 +425,8 @@ class VPNClient:
                 started = time.monotonic()
                 self.transport.send(framing.encode_frame(c.MSG_PING, token), addr)
                 if pending.event.wait(per_try):
-                    return time.monotonic() - started
-            return None
+                    return time.monotonic() - started, pending.version
+            return None, ""
         finally:
             with self._lock:
                 self._pending_pings.pop(token, None)
@@ -422,6 +435,9 @@ class VPNClient:
         with self._lock:
             pending = self._pending_pings.get(body[:8])
         if pending is not None:
+            marker = b"|spacecop/"
+            if marker in body:
+                pending.version = body.split(marker, 1)[1][:32].decode("ascii", "replace")
             pending.event.set()
 
     def _handle_error(self, body: bytes) -> None:

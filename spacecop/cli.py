@@ -72,6 +72,8 @@ def cmd_node(args) -> int:
     node.start(bootstrap=bootstrap)
     host, port = node.transport.local_addr
     uri = build_uri(args.advertise, port, ident.x_public, ident.ed_public)
+    from . import __version__
+    print(f"[node] SpaceCopVPN {__version__} (streams supported)")
     print(f"[node] listening on {host}:{port}")
     print(f"[node] identity  (ed25519) : {ident.ed_public.hex()}")
     print(f"[node] handshake (x25519)  : {ident.x_public.hex()}")
@@ -171,12 +173,17 @@ def cmd_ping(args) -> int:
     client = VPNClient()
     client.start()
     try:
-        rtt = client.ping(addr, timeout=args.timeout)
+        rtt, version = client.probe(addr, timeout=args.timeout)
         if rtt is None:
             print(f"[ping] {addr[0]}:{addr[1]}  NO REPLY — node not running, or UDP port "
                   f"blocked (provider firewall / security group), or wrong host:port")
             return 1
-        print(f"[ping] {addr[0]}:{addr[1]}  PONG in {rtt * 1000:.0f} ms — UDP reachable")
+        from . import __version__
+        print(f"[ping] {addr[0]}:{addr[1]}  PONG in {rtt * 1000:.0f} ms — UDP reachable; "
+              f"node version: {version or 'OLD (< 0.2.0)'}; client version: {__version__}")
+        if not version:
+            print("[ping] WARNING: the node runs an outdated build without stream support — "
+                  "web sites will not load through it. Update the server: deploy/update_server.sh")
         if x_public is None:
             return 0
         try:

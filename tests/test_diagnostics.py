@@ -28,6 +28,27 @@ class TestDiagnostics(unittest.TestCase):
         self.assertIsNotNone(rtt)
         self.assertLess(rtt, 3.0)
 
+    def test_probe_reports_node_version(self):
+        from spacecop import __version__
+        rtt, version = self.client.probe(self.node.address, timeout=3.0)
+        self.assertIsNotNone(rtt)
+        self.assertEqual(version, __version__)
+
+    def test_probe_old_node_has_no_version(self):
+        """A pre-0.2.0 node echoes the PING body verbatim: version must be ''."""
+        from spacecop.protocol import constants as c, framing
+        node_send = self.node.transport.send
+
+        def legacy_send(data, addr):
+            msg_type, body = framing.decode_frame(data)
+            if msg_type == c.MSG_PONG:
+                data = framing.encode_frame(c.MSG_PONG, body[:8])  # old behaviour
+            node_send(data, addr)
+        self.node.transport.send = legacy_send
+        rtt, version = self.client.probe(self.node.address, timeout=3.0)
+        self.assertIsNotNone(rtt)
+        self.assertEqual(version, "")
+
     def test_ping_unreachable(self):
         # A bound-but-unused UDP port: nothing answers.
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

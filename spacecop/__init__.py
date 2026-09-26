@@ -10,6 +10,6 @@ Subpackages:
 * :mod:`spacecop.tun` — cross-platform device integration + SOCKS proxy.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]

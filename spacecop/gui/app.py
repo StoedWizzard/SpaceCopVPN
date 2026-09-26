@@ -279,19 +279,25 @@ class App:
         client = VPNClient()
         client.start()
         try:
-            rtt = client.ping(target.address, timeout=4.0)
+            rtt, version = client.probe(target.address, timeout=4.0)
             if rtt is None:
                 self._post("check_done", (False,
                     f"{target.host}:{target.port}: узел НЕ отвечает по UDP. Проверьте на сервере: "
                     f"systemctl status spacecop-node, ss -ulnp | grep {target.port}, и что UDP/{target.port} "
                     f"открыт в файрволе провайдера (security group)."))
                 return
+            if not version:
+                self._post("check_done", (False,
+                    f"{target.host}:{target.port}: узел отвечает (PONG {rtt * 1000:.0f} мс), но это "
+                    f"УСТАРЕВШАЯ версия без поддержки потоков — сайты через него не загрузятся. "
+                    f"Обновите сервер: sudo /opt/spacecop/deploy/update_server.sh"))
+                return
             try:
                 conn = client.connect(target.x_public, target.address,
                                       expected_node_ed=target.ed_public, timeout=6.0)
                 self._post("check_done", (True,
-                    f"{target.host}:{target.port}: PONG за {rtt * 1000:.0f} мс, рукопожатие OK, "
-                    f"узел {conn.node_id_hex()}."))
+                    f"{target.host}:{target.port}: PONG за {rtt * 1000:.0f} мс, версия узла {version}, "
+                    f"рукопожатие OK, узел {conn.node_id_hex()}."))
             except Exception as exc:
                 self._post("check_done", (False,
                     f"{target.host}:{target.port}: узел достижим (PONG {rtt * 1000:.0f} мс), "
@@ -322,7 +328,13 @@ class App:
                 client.connect(target.x_public, target.address,
                                expected_node_ed=target.ed_public, timeout=6.0)
                 ok += 1
-                self._post("log", f"Подключено к узлу {target.host}:{target.port}.")
+                _rtt, version = client.probe(target.address, timeout=3.0)
+                if version:
+                    self._post("log", f"Подключено к узлу {target.host}:{target.port} (версия {version}).")
+                else:
+                    self._post("log", f"⚠ Подключено к узлу {target.host}:{target.port}, но он УСТАРЕЛ "
+                                      f"(нет поддержки потоков) — сайты грузиться не будут. "
+                                      f"Обновите сервер: sudo /opt/spacecop/deploy/update_server.sh")
             except Exception as exc:
                 self._post("log", f"Не удалось подключиться к {text[:48]}…: {exc}")
         if ok == 0:

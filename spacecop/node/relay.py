@@ -207,7 +207,11 @@ class RelayNode:
         elif msg_type == c.MSG_SCORE_QUERY:
             self._handle_score_query(addr)
         elif msg_type == c.MSG_PING:
-            self.transport.send(framing.encode_frame(c.MSG_PONG, body), addr)
+            # Echo the token and append our software version so a client can
+            # tell an outdated node apart from a broken one.
+            from .. import __version__
+            pong = body[:8] + b"|spacecop/" + __version__.encode()
+            self.transport.send(framing.encode_frame(c.MSG_PONG, pong), addr)
 
     def _handle_handshake(self, body: bytes, addr: Address) -> None:
         try:

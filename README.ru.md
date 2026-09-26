@@ -81,6 +81,9 @@ sudo ./deploy/install_server.sh
 spacecop://203.0.113.9:51820/<x25519-ключ>/<ed25519-идентификатор>
 ```
 
+Обновить работающий узел: `sudo ./deploy/update_server.sh` (служба работает из
+`/opt/spacecop`, поэтому `git pull` в другом каталоге узел не обновляет).
+
 ### Клиент с интерфейсом (Arch Linux)
 
 ```

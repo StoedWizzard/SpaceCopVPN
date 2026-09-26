@@ -57,6 +57,20 @@ spacecop://203.0.113.9:51820/<x25519-ключ>/<ed25519-идентификато
 Позже параметры правятся в `/etc/spacecop/node.env`, затем
 `sudo systemctl restart spacecop-node`.
 
+### Обновление узла
+
+Служба работает из копии в `/opt/spacecop`. `git pull` в другом клоне (например,
+`~/SpaceCopVPN`) **узел не обновляет** — его нужно перенести и перезапустить:
+
+```bash
+cd ~/SpaceCopVPN && git pull
+sudo ./deploy/update_server.sh          # скопирует код в /opt/spacecop и перезапустит службу
+```
+
+Скрипт печатает установленную версию и новый PID; в первой строке журнала
+появится `[node] SpaceCopVPN <версия> (streams supported)`. Клиент и `spacecop
+ping` показывают версию узла и предупреждают, если он устарел.
+
 ### Управление
 
 ```bash

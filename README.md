@@ -83,6 +83,9 @@ prints a **connection URI**:
 spacecop://203.0.113.9:51820/<x25519_hex>/<ed25519_hex>
 ```
 
+Update a running node later with `sudo ./deploy/update_server.sh` (the service
+runs from `/opt/spacecop`, so a `git pull` elsewhere does not update it).
+
 ### Graphical client (Arch Linux)
 
 ```
