@@ -123,6 +123,36 @@ else
 fi
 [[ -f "$INSTALL_DIR/spacecop/cli.py" ]] || die "sources not found in $INSTALL_DIR"
 
+# ---------------------------------------------------------------- native crypto
+build_native() {
+  # ChaCha20-Poly1305 in C (native/spacecop_crypto.c): 300x faster than the
+  # pure-Python fallback. Needs gcc or clang; we try to install gcc, and the
+  # node still works (slowly) without it.
+  if ! command -v gcc >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
+    log "Installing gcc for the native crypto library"
+    if   command -v apt-get >/dev/null; then apt-get install -y -qq gcc libc6-dev >/dev/null || true
+    elif command -v dnf     >/dev/null; then dnf install -y gcc || true
+    elif command -v yum     >/dev/null; then yum install -y gcc || true
+    elif command -v pacman  >/dev/null; then pacman -S --noconfirm --needed gcc || true
+    elif command -v apk     >/dev/null; then apk add --no-cache gcc musl-dev || true
+    elif command -v zypper  >/dev/null; then zypper --non-interactive install gcc || true
+    fi
+  fi
+  local cc=""
+  command -v gcc >/dev/null 2>&1 && cc=gcc
+  [[ -z "$cc" ]] && command -v cc >/dev/null 2>&1 && cc=cc
+  if [[ -n "$cc" ]]; then
+    if CC="$cc" bash "$INSTALL_DIR/native/build.sh" >/dev/null 2>&1; then
+      log "Native crypto library built ($("$PY" -c "import sys; sys.path.insert(0,'$INSTALL_DIR'); from spacecop.crypto import aead; print(aead.backend())"))"
+    else
+      log "WARNING: native crypto build failed; the node will use pure Python (slow)."
+    fi
+  else
+    log "WARNING: no C compiler; the node will use pure-Python crypto (slow). Install gcc and re-run."
+  fi
+}
+build_native
+
 # ---------------------------------------------------------------- 3. user/dirs
 if ! id -u spacecop >/dev/null 2>&1; then
   log "Creating system user 'spacecop'"

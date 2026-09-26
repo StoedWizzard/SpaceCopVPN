@@ -30,6 +30,7 @@ FRAGMENT_HEADER_SIZE = 12  # group_id(4) + count(4) + index(4)
 # A cryptographically-seeded RNG for the shuffle so the emission order is not
 # predictable from outside.
 _sysrandom = random.SystemRandom()
+_group_rng = random.Random(os.urandom(16))
 
 
 @dataclass
@@ -59,7 +60,11 @@ class Fragmenter:
         self.fragment_size = fragment_size
 
     def _new_group_id(self) -> int:
-        return struct.unpack("!I", os.urandom(4))[0]
+        # Group ids only need to be unique among in-flight messages of one
+        # session (they are inside the encrypted payload); a Mersenne Twister
+        # seeded from os.urandom is plenty and ~20x cheaper per message than a
+        # syscall per packet on the data path.
+        return _group_rng.getrandbits(32)
 
     def fragment(self, payload: bytes, group_id: int = None,
                  shuffle: bool = True) -> List[Fragment]:

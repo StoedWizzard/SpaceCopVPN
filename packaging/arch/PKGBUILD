@@ -1,27 +1,29 @@
 # Maintainer: SpaceCopVPN contributors
 # Build with: packaging/arch/build.sh   (creates the source tarball and runs makepkg)
 pkgname=spacecopvpn
-pkgver=0.3.0
+pkgver=0.3.2
 pkgrel=1
 pkgdesc="From-scratch decentralised, incentivised VPN: CLI + graphical client (SOCKS5 tunnel)"
-arch=('any')
+arch=('x86_64' 'aarch64')
 url="https://github.com/StoedWizzard/SpaceCopVPN"
 license=('MIT')
 depends=('python' 'tk')
-makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+makedepends=('gcc' 'python-build' 'python-installer' 'python-wheel' 'python-setuptools')
 optdepends=('python-pytest: run the test-suite')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
+  # Native ChaCha20-Poly1305 (goes into the wheel as spacecop/crypto/lib/).
+  bash native/build.sh
   python -m build --wheel --no-isolation
 }
 
 check() {
   cd "$srcdir/$pkgname-$pkgver"
   # Fast, network-free subset (crypto vectors, protocol, fragmentation, scoring).
-  python -m unittest tests.test_crypto tests.test_protocol tests.test_fragmentation tests.test_node
+  python -m unittest tests.test_crypto tests.test_native_crypto tests.test_protocol tests.test_fragmentation tests.test_node
 }
 
 package() {

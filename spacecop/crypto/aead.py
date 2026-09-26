@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import struct
 
-from . import chacha20, poly1305
+from . import chacha20, native, poly1305
 
 
 class AuthenticationError(Exception):
@@ -45,12 +45,20 @@ def _build_mac_data(aad: bytes, ciphertext: bytes) -> bytes:
 
 
 def encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes = b"") -> bytes:
-    """AEAD-encrypt ``plaintext``; returns ``ciphertext || tag`` (tag is 16 bytes)."""
+    """AEAD-encrypt ``plaintext``; returns ``ciphertext || tag`` (tag is 16 bytes).
+
+    Uses the native library when one is loaded (see :mod:`.native`), else the
+    pure-Python reference below; both produce identical output."""
     if len(key) != 32:
         raise ValueError("key must be 32 bytes")
     if len(nonce) != 12:
         raise ValueError("nonce must be 12 bytes")
+    if native.available():
+        return native.aead_encrypt(key, nonce, bytes(plaintext), bytes(aad))
+    return _encrypt_pure(key, nonce, plaintext, aad)
 
+
+def _encrypt_pure(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes = b"") -> bytes:
     otk = _poly1305_key_gen(key, nonce)
     # Data encryption starts at counter 1; counter 0 produced the Poly1305 key.
     ciphertext = chacha20.chacha20_xor(key, 1, nonce, plaintext)
@@ -66,7 +74,15 @@ def decrypt(key: bytes, nonce: bytes, ciphertext_and_tag: bytes, aad: bytes = b"
         raise ValueError("nonce must be 12 bytes")
     if len(ciphertext_and_tag) < 16:
         raise AuthenticationError("ciphertext too short to contain a tag")
+    if native.available():
+        out = native.aead_decrypt(key, nonce, bytes(ciphertext_and_tag), bytes(aad))
+        if out is None:
+            raise AuthenticationError("AEAD tag verification failed")
+        return out
+    return _decrypt_pure(key, nonce, ciphertext_and_tag, aad)
 
+
+def _decrypt_pure(key: bytes, nonce: bytes, ciphertext_and_tag: bytes, aad: bytes = b"") -> bytes:
     ciphertext = ciphertext_and_tag[:-16]
     tag = ciphertext_and_tag[-16:]
 
@@ -78,3 +94,8 @@ def decrypt(key: bytes, nonce: bytes, ciphertext_and_tag: bytes, aad: bytes = b"
 
 
 TAG_SIZE = 16
+
+
+def backend() -> str:
+    """'native (<path>)' or 'python' — shown in diagnostics and the GUI log."""
+    return f"native ({native.path()})" if native.available() else "python"

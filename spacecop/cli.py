@@ -73,7 +73,8 @@ def cmd_node(args) -> int:
     host, port = node.transport.local_addr
     uri = build_uri(args.advertise, port, ident.x_public, ident.ed_public)
     from . import __version__
-    print(f"[node] SpaceCopVPN {__version__} (streams supported)")
+    from .crypto import aead as _aead
+    print(f"[node] SpaceCopVPN {__version__} (streams supported; crypto: {_aead.backend()})")
     print(f"[node] listening on {host}:{port}")
     print(f"[node] identity  (ed25519) : {ident.ed_public.hex()}")
     print(f"[node] handshake (x25519)  : {ident.x_public.hex()}")
@@ -286,7 +287,9 @@ def cmd_gui(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     from . import __version__
     parser = argparse.ArgumentParser(prog="spacecop", description=__doc__.splitlines()[0])
-    parser.add_argument("--version", action="version", version=f"spacecop {__version__}")
+    from .crypto import aead as _aead
+    parser.add_argument("--version", action="version",
+                        version=f"spacecop {__version__} (crypto: {_aead.backend()})")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_key = sub.add_parser("keygen", help="create/load a node identity and print its keys")

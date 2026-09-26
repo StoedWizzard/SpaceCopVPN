@@ -119,12 +119,15 @@ class SpaceCopVpnService : VpnService() {
                 if (!Python.isStarted()) Python.start(AndroidPlatform(this))
                 val py = Python.getInstance()
                 val mod = py.getModule("spacecop.tun.android")
+                // Point ctypes at libspacecop_crypto.so bundled in the APK.
+                py.getModule("spacecop.crypto.native").callAttr("set_native_dir", applicationInfo.nativeLibraryDir)
                 // Python sockets must be protect()ed: expose a callback the client
                 // uses right after creating its UDP socket.
                 mod.callAttr("set_socket_protector", SocketProtector(this))
                 val h = mod.callAttr("run_engine", pfd.fd, uris.toTypedArray(), dns, discover, PyLogger())
                 handle = h
                 state = "on"
+                appendLog("crypto: " + py.getModule("spacecop.crypto.aead").callAttr("backend").toString())
                 updateNotification("Подключено · узлов: ${uris.size}")
                 startPoller(h)
             } catch (e: Exception) {

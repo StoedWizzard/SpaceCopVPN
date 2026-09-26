@@ -7,6 +7,7 @@ on:
     paths:
       - "android/**"
       - "spacecop/**"
+      - "native/**"
       - "pyproject.toml"
       - ".github/workflows/android.yml"
   pull_request:
@@ -42,7 +43,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125 cmake;3.22.1"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

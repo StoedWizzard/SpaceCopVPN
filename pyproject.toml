@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spacecopvpn"
-version = "0.3.0"
-description = "A from-scratch, decentralised, incentivised VPN protocol (stdlib only)"
+version = "0.3.2"
+description = "A from-scratch, decentralised, incentivised VPN protocol (stdlib + optional C crypto)"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -28,3 +28,6 @@ Homepage = "https://github.com/stoedwizzard/spacecopvpn"
 
 [tool.setuptools.packages.find]
 include = ["spacecop*"]
+
+[tool.setuptools.package-data]
+"spacecop.crypto" = ["lib/*"]

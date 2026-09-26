@@ -20,8 +20,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Build the native crypto library (Linux)
+        if: runner.os == 'Linux'
+        run: bash native/build.sh
+      - name: Build the native crypto library (Windows, MinGW gcc)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./native/build.ps1
+      - name: Show crypto backend
+        run: python -c "from spacecop.crypto import aead; print(aead.backend())"
       - name: Run test-suite (TUN tests skip without root)
         run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  pure:
+    name: Pure-Python fallback (no native library)
+    runs-on: ubuntu-latest
+    env:
+      SPACECOP_PURE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Crypto, protocol and stream tests without the C library
+        run: python -m unittest tests.test_crypto tests.test_native_crypto tests.test_protocol tests.test_stream -v
 
   tun:
     name: Real-TUN engine tests (Linux, root)
@@ -31,5 +53,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Build the native crypto library
+        run: bash native/build.sh
       - name: Run engine tests on a real TUN interface
         run: sudo -E "$(command -v python)" -m unittest discover -s tests -p "test_engine_tun.py" -v

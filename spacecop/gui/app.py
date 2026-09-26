@@ -315,8 +315,18 @@ class App:
         self._build_ui()
         self._load_profile_into_ui(self.current_profile)
         self._show_page("connect")
+        self._log_crypto_backend()
         self.root.after(200, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _log_crypto_backend(self) -> None:
+        from ..crypto import aead
+        backend = aead.backend()
+        if backend.startswith("native"):
+            self._log(f"Шифрование: C-библиотека ({backend[8:-1]})", "ok")
+        else:
+            self._log("Шифрование: чистый Python (медленно). Соберите native/build.sh "
+                      "или установите пакет заново, чтобы включить C-библиотеку.", "warn")
 
     # ================================================================ UI build
     def _build_ui(self) -> None:
