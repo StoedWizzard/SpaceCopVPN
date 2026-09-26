@@ -188,6 +188,8 @@ class SystemVPN:
             stop.set()  # 'stop' received, or stdin closed (parent died)
         threading.Thread(target=stdin_watch, daemon=True).start()
 
+        import json
+
         try:
             while not stop.wait(status_every):
                 if self.engine is not None:
@@ -196,5 +198,22 @@ class SystemVPN:
                                f"dns={self.engine.dns_queries} "
                                f"up={self.engine.bytes_up // 1024}KB down={self.engine.bytes_down // 1024}KB "
                                f"nodes={len(self.client.connections())}")
+                    # Machine-readable node table for the GUI (one line, JSON).
+                    self._emit("NODES " + json.dumps(self.node_table(), separators=(",", ":")))
         finally:
             self.stop()
+
+    def node_table(self) -> list:
+        """Per-node competition stats, as plain dicts."""
+        rows = []
+        for conn in self.client._selector.ranking():
+            rows.append({
+                "id": conn.node_id_hex(),
+                "addr": f"{conn.addr[0]}:{conn.addr[1]}",
+                "requests": conn.requests,
+                "failures": conn.failures,
+                "latency_ms": round(conn.ewma_latency * 1000) if conn.ewma_latency else None,
+                "health": round(conn.health_score(), 1),
+                "bytes": conn.bytes_served,
+            })
+        return rows

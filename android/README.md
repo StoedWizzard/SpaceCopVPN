@@ -6,14 +6,22 @@
 приложения на Python через [Chaquopy](https://chaquo.com/chaquopy/). Никаких
 сторонних VPN-библиотек: `spacecop/tun/engine.py` терминирует TCP и DNS сам.
 
-## Сборка
+## Готовый APK (GitHub Actions)
 
-Нужны Android Studio (или командный Gradle) и JDK 17. Chaquopy требует
-установленный Python 3.8–3.12 на машине сборки.
+Сборка автоматическая: workflow `.github/workflows/android.yml` собирает
+debug-APK на каждый push и pull request, а по тегу `v*` публикует его в
+Releases. Скачать: GitHub → Actions → «Android APK» → последний запуск →
+Artifacts → `SpaceCopVPN-debug-apk` (или Releases для тегов). На телефоне
+разрешите установку из неизвестных источников.
+
+## Сборка вручную
+
+Нужны JDK 17, Android SDK (platform 34) и Python 3.8–3.12 для Chaquopy.
 
 ```
 cd android
-./gradlew assembleDebug        # app/build/outputs/apk/debug/app-debug.apk
+gradle assembleDebug           # или через Android Studio; результат:
+                               # app/build/outputs/apk/debug/app-debug.apk
 ```
 
 `app/build.gradle.kts` устанавливает пакет `spacecopvpn` из корня репозитория

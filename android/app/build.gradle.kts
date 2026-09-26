@@ -29,9 +29,11 @@ android {
 chaquopy {
     defaultConfig {
         version = "3.11"
+        // Python used at build time (CI installs 3.11 via actions/setup-python).
+        buildPython("python3")
         // Bundle the SpaceCopVPN package from the repository root (stdlib-only,
-        // so no wheels are needed).
-        pip { install("..") }
+        // so no wheels are needed).  Path is relative to this module (app/).
+        pip { install("../..") }
     }
 }
 
