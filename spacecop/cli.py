@@ -203,27 +203,27 @@ def cmd_ping(args) -> int:
 
 
 def cmd_vpn(args) -> int:
-    """Full-system mode (Linux, root): TUN + routing, everything through the overlay."""
-    import os
-    import sys as _sys
+    """Full-system mode (Linux root / Windows Administrator): TUN + routing."""
+    from .tun.system import create_system_vpn, is_privileged
 
-    if not _sys.platform.startswith("linux"):
-        raise SystemExit("full-system mode is Linux-only for now; use 'proxy' (SOCKS5) elsewhere")
-    if os.geteuid() != 0:
-        raise SystemExit("full-system mode needs root: sudo spacecop vpn ... (or pkexec)")
-    from .tun.system import SystemVPN
+    if not is_privileged():
+        raise SystemExit("full-system mode needs elevated rights: "
+                         "sudo spacecop vpn ... (Linux) or run as Administrator (Windows)")
 
     def emit(text):
         print(f"[vpn] {text}", flush=True)
 
     client = _connect_client(args)
     host, _, port = args.dns.rpartition(":")
-    vpn = SystemVPN(client, dns_server=(host or "1.1.1.1", int(port or 53)), on_event=emit)
     try:
+        vpn = create_system_vpn(client, dns_server=(host or "1.1.1.1", int(port or 53)), on_event=emit)
         vpn.start()
     except Exception as exc:
         emit(f"failed to start: {exc}")
-        vpn.stop()
+        try:
+            vpn.stop()
+        except Exception:
+            pass
         client.stop()
         return 1
     emit("READY")
@@ -339,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ping.add_argument("--timeout", type=float, default=4.0)
     p_ping.set_defaults(func=cmd_ping)
 
-    p_vpn = sub.add_parser("vpn", help="full-system tunnel (Linux, root): TUN + routes, no SOCKS")
+    p_vpn = sub.add_parser("vpn", help="full-system tunnel (Linux root / Windows admin): TUN + routes")
     add_client_args(p_vpn)
     p_vpn.add_argument("--dns", default="1.1.1.1:53",
                        help="DNS-over-TCP resolver reached through the tunnel")

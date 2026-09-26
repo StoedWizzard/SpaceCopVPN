@@ -306,6 +306,7 @@ class App:
         self.client: Optional[VPNClient] = None
         self.proxy: Optional[Socks5Proxy] = None
         self.sys_proc: Optional[subprocess.Popen] = None
+        self.sys_vpn = None                      # in-process whole-system controller
         self._sys_rows: List[dict] = []
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._busy = False
@@ -419,8 +420,9 @@ class App:
 
         body = self._card(page, "Режим",
                           "«Вся система» заворачивает весь трафик компьютера в VPN через "
-                          "виртуальный интерфейс (Linux, спросит пароль администратора). "
-                          "«SOCKS5» не требует прав: прокси указывается в браузере или системе.")
+                          "виртуальный интерфейс (Linux: спросит пароль; Windows: перезапустит "
+                          "окно от администратора, драйвер Wintun). «SOCKS5» не требует прав: "
+                          "прокси указывается в браузере или системе.")
         self.var_mode = tk.StringVar(value="socks")
         mrow = self._row(body)
         ttk.Radiobutton(mrow, text="SOCKS5-прокси", variable=self.var_mode, value="socks",
@@ -428,7 +430,7 @@ class App:
         rb_sys = ttk.Radiobutton(mrow, text="Вся система (TUN)", variable=self.var_mode,
                                  value="system", command=self._on_mode_change)
         rb_sys.pack(side="left", padx=(18, 0))
-        if not sys.platform.startswith("linux"):
+        if not (sys.platform.startswith("linux") or sys.platform.startswith("win")):
             rb_sys.state(["disabled"])
         srow = self._row(body)
         self._label(srow, "SOCKS адрес", muted=True).pack(side="left")
@@ -526,7 +528,8 @@ class App:
                                     (self.e_dns, "dns", "1.1.1.1:53")):
             entry.set(str(prof.get(key, default)))
         self.var_discover.set(bool(prof.get("discover", True)))
-        self.var_mode.set(prof.get("mode", "socks") if sys.platform.startswith("linux") else "socks")
+        supported = sys.platform.startswith("linux") or sys.platform.startswith("win")
+        self.var_mode.set(prof.get("mode", "socks") if supported else "socks")
 
     def _read_ui_into_profile(self) -> dict:
         try:
@@ -719,7 +722,7 @@ class App:
 
     # ================================================================ connect
     def _connect(self) -> None:
-        if self._busy or self.client is not None or self.sys_proc is not None:
+        if self._busy or self.client is not None or self.sys_proc is not None or self.sys_vpn is not None:
             return
         prof = self._read_ui_into_profile()
         if not prof["nodes"]:
@@ -730,9 +733,84 @@ class App:
         save_profiles(self.profiles)
         self._set_busy(True, "подключение…")
         if prof["mode"] == "system":
-            threading.Thread(target=self._connect_system_worker, args=(prof,), daemon=True).start()
+            from ..tun.system import is_privileged
+            if is_privileged():
+                # Root / Administrator already: run the tunnel inside this process.
+                threading.Thread(target=self._connect_system_inprocess, args=(prof,), daemon=True).start()
+            elif sys.platform.startswith("win"):
+                self._relaunch_elevated()
+            else:
+                threading.Thread(target=self._connect_system_worker, args=(prof,), daemon=True).start()
         else:
             threading.Thread(target=self._connect_socks_worker, args=(prof,), daemon=True).start()
+
+    # -- whole-system mode, in-process (Linux root / Windows Administrator) ------
+    def _connect_client_to_nodes(self, prof: dict) -> Optional[VPNClient]:
+        client = VPNClient(discovery_enabled=bool(prof.get("discover", True)),
+                           on_event=lambda text: self._post("log", text))
+        client.start()
+        ok = 0
+        for text in prof["nodes"]:
+            try:
+                target = parse_uri(text)
+                client.connect(target.x_public, target.address,
+                               expected_node_ed=target.ed_public, timeout=6.0)
+                ok += 1
+                _rtt, version = client.probe(target.address, timeout=3.0)
+                if version:
+                    self._post("log", f"Подключено к узлу {target.host}:{target.port} (v{version}).")
+                else:
+                    self._post("logw", f"Узел {target.host}:{target.port} УСТАРЕЛ (нет потоков) — "
+                                       f"обновите сервер: sudo /opt/spacecop/deploy/update_server.sh")
+            except Exception as exc:
+                self._post("loge", f"Не удалось подключиться к {text[:48]}…: {exc}")
+        if ok == 0:
+            client.stop()
+            return None
+        return client
+
+    def _connect_system_inprocess(self, prof: dict) -> None:
+        from ..tun.system import create_system_vpn
+
+        client = self._connect_client_to_nodes(prof)
+        if client is None:
+            self._post("connect_failed", "ни один узел не ответил")
+            return
+        host, _, port = prof.get("dns", "1.1.1.1:53").rpartition(":")
+        try:
+            vpn = create_system_vpn(client, dns_server=(host or "1.1.1.1", int(port or 53)),
+                                    on_event=lambda text: self._post("log", f"[vpn] {text}"))
+            vpn.start()
+        except Exception as exc:
+            try:
+                vpn.stop()
+            except Exception:
+                pass
+            client.stop()
+            self._post("connect_failed", f"режим «Вся система»: {exc}")
+            return
+        self._post("connected_inprocess", (client, vpn))
+
+    def _relaunch_elevated(self) -> None:
+        """Windows: restart this program as Administrator and connect at once."""
+        import ctypes
+        if getattr(sys, "frozen", False):
+            exe, params = sys.executable, "--connect"
+        else:
+            exe = sys.executable
+            params = subprocess.list2cmdline(["-m", "spacecop.gui.app", "--connect"])
+        self._save_current()
+        try:
+            rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)  # type: ignore[attr-defined]
+        except Exception as exc:
+            rc = 0
+            self._log(f"Не удалось запросить права администратора: {exc}", "err")
+        if rc > 32:
+            self._log("Открывается окно с правами администратора; это окно закроется.", "warn")
+            self.root.after(800, self.root.destroy)
+        else:
+            self._set_busy(False)
+            self._log("Запрос прав администратора отклонён.", "err")
 
     def _connect_socks_worker(self, prof: dict) -> None:
         client = VPNClient(discovery_enabled=bool(prof.get("discover", True)),
@@ -811,7 +889,11 @@ class App:
         self._post("sys_exited", (code, ready))
 
     def _disconnect(self) -> None:
-        if self.client is not None:
+        if self.sys_vpn is not None:
+            vpn, client = self.sys_vpn, self.client
+            self.sys_vpn, self.client = None, None
+            threading.Thread(target=self._stop_inprocess_worker, args=(vpn, client), daemon=True).start()
+        elif self.client is not None:
             proxy, client = self.proxy, self.client
             self.proxy, self.client = None, None
             threading.Thread(target=self._stop_worker, args=(proxy, client), daemon=True).start()
@@ -828,6 +910,14 @@ class App:
         self.tree.delete(*self.tree.get_children())
         self.lbl_leader.configure(text="")
         self._log("Отключено.")
+
+    @staticmethod
+    def _stop_inprocess_worker(vpn, client) -> None:
+        try:
+            vpn.stop()
+        finally:
+            if client:
+                client.stop()
 
     @staticmethod
     def _stop_worker(proxy, client) -> None:
@@ -853,7 +943,7 @@ class App:
         req = f"GET / HTTP/1.0\r\nHost: {host}\r\n\r\n".encode()
         started = time.monotonic()
         try:
-            if self.client is not None:
+            if self.client is not None and self.sys_vpn is None:
                 s = self.client.open_stream(host, port, timeout=15)
                 s.send(req)
                 s.send_eof()
@@ -905,6 +995,12 @@ class App:
             self._set_busy(False)
             self._set_connected(True, f"SOCKS5 {host}:{port} · узлов: {ok}")
             self._log(f"SOCKS5-прокси запущен на {host}:{port}. Укажите его в браузере/системе.", "ok")
+        elif kind == "connected_inprocess":
+            self.client, self.sys_vpn = payload
+            self._set_busy(False)
+            name = "Wintun SpaceCopVPN" if sys.platform.startswith("win") else "TUN spacecop0"
+            self._set_connected(True, f"вся система · {name}")
+            self._log("Весь трафик компьютера идёт через VPN.", "ok")
         elif kind == "sys_started":
             self.sys_proc = payload
         elif kind == "connected_system":
@@ -976,7 +1072,7 @@ class App:
     # ================================================================ helpers
     def _set_busy(self, busy: bool, status: str = "") -> None:
         self._busy = busy
-        connected = self.client is not None or self.sys_proc is not None
+        connected = self.client is not None or self.sys_proc is not None or self.sys_vpn is not None
         self.btn_connect.set_enabled(not (busy or connected))
         self.btn_test.set_enabled(connected and not busy)
         self.btn_check.set_enabled(not busy)
@@ -1009,14 +1105,17 @@ class App:
         self.txt_log.configure(state="disabled")
 
     def _on_close(self) -> None:
-        if self.client is not None or self.sys_proc is not None:
+        if self.client is not None or self.sys_proc is not None or self.sys_vpn is not None:
             self._disconnect()
         self.root.after(300, self.root.destroy)
 
 
 def main() -> int:
     root = tk.Tk()
-    App(root)
+    app = App(root)
+    if "--connect" in sys.argv[1:]:
+        # Started (re)elevated with the request to connect right away.
+        root.after(500, app._connect)
     root.mainloop()
     return 0
 

@@ -98,9 +98,12 @@ runs from `/opt/spacecop`, so a `git pull` elsewhere does not update it).
 ### Windows
 
 Download `SpaceCopVPN.exe` from the latest Release (or the `SpaceCopVPN-windows`
-artifact of the "Windows app" workflow), run it, paste a URI, connect in
-SOCKS5 mode and point Windows' proxy settings at `127.0.0.1:1080`. Built by
-PyInstaller in CI; no install needed. See `packaging/windows/README.md`.
+artifact of the "Windows app" workflow), run it, paste a URI and connect.
+"Whole system" mode creates a Wintun adapter (the signed TUN driver from the
+WireGuard project, bundled) and routes everything through the overlay after
+a UAC prompt; SOCKS5 mode needs no rights (point Windows' proxy settings at
+`127.0.0.1:1080`). Built by PyInstaller in CI; no install needed. See
+`packaging/windows/README.md`.
 
 ### Graphical client (Arch Linux)
 

@@ -34,14 +34,36 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
 
+      # Wintun: the signed Windows TUN driver (wintun.net). Bundled next to the
+      # executables so whole-system mode works out of the box.
+      - name: Download Wintun
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wintun-src -Force
+          New-Item -ItemType Directory -Force wintun | Out-Null
+          Copy-Item wintun-src\wintun\bin\amd64\wintun.dll wintun\wintun.dll
+          Copy-Item wintun-src\wintun\LICENSE.txt wintun\WINTUN-LICENSE.txt
+          Get-FileHash wintun\wintun.dll
+
+      - name: Whole-system smoke test (Wintun adapter create/close; informational)
+        continue-on-error: true
+        shell: pwsh
+        env:
+          SPACECOP_WINTUN: ${{ github.workspace }}\wintun\wintun.dll
+        run: |
+          python -c "from spacecop.tun.windows import WindowsTun, is_admin; print('admin:', is_admin()); t = WindowsTun(); print('adapter if', t.interface_index(), 'driver', t.driver_version()); t.write_packet(b'\x45' + b'\x00'*19); t.close(); print('wintun OK')"
+
       - name: Build GUI (SpaceCopVPN.exe) and CLI (spacecop.exe)
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name SpaceCopVPN `
             --collect-submodules spacecop `
+            --add-binary "wintun\wintun.dll;." `
             packaging/windows/spacecop_gui_entry.py
           pyinstaller --noconfirm --clean --onefile --console --name spacecop `
             --collect-submodules spacecop `
+            --add-binary "wintun\wintun.dll;." `
             packaging/windows/spacecop_cli_entry.py
           Get-ChildItem dist
 
@@ -58,6 +80,8 @@ jobs:
           $ref = "$env:GITHUB_REF_NAME" -replace '/', '-'
           Copy-Item dist\SpaceCopVPN.exe out\SpaceCopVPN.exe
           Copy-Item dist\spacecop.exe out\spacecop.exe
+          Copy-Item wintun\wintun.dll out\wintun.dll
+          Copy-Item wintun\WINTUN-LICENSE.txt out\WINTUN-LICENSE.txt
           Copy-Item packaging\windows\README.md out\README.txt
           Compress-Archive -Path out\* -DestinationPath "SpaceCopVPN-windows-$ref.zip" -Force
           Get-ChildItem .

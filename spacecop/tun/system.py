@@ -35,9 +35,28 @@ import threading
 import time
 from typing import Callable, Optional, Tuple
 
-from . import netconfig
 from .engine import PacketEngine
-from .linux import LinuxTun
+# netconfig (fcntl) and LinuxTun are Linux-only: imported lazily so this
+# module (and its create_system_vpn factory) imports cleanly on Windows.
+
+def is_privileged() -> bool:
+    """Root on Linux, Administrator on Windows."""
+    if sys.platform.startswith("win"):
+        from .windows import is_admin
+        return is_admin()
+    return getattr(os, "geteuid", lambda: 1)() == 0
+
+
+def create_system_vpn(client, dns_server: Tuple[str, int] = ("1.1.1.1", 53),
+                      on_event: Optional[Callable[[str], None]] = None):
+    """Return the whole-system controller for this platform (Linux or Windows)."""
+    if sys.platform.startswith("win"):
+        from .system_windows import WindowsSystemVPN
+        return WindowsSystemVPN(client, dns_server=dns_server, on_event=on_event)
+    if sys.platform.startswith("linux"):
+        return SystemVPN(client, dns_server=dns_server, on_event=on_event)
+    raise RuntimeError(f"whole-system mode is not available on {sys.platform}; use SOCKS5 mode")
+
 
 TUN_NAME = "spacecop0"
 TUN_ADDR = "10.77.0.2"
@@ -70,6 +89,9 @@ class SystemVPN:
     def start(self) -> None:
         if os.geteuid() != 0:
             raise PermissionError("full-system mode needs root (CAP_NET_ADMIN); run via sudo/pkexec")
+        from . import netconfig
+        from .linux import LinuxTun
+
         self._gw, self._dev = netconfig.default_route()
         if self._dev is None:
             raise RuntimeError("no IPv4 default route found; is the network up?")
@@ -98,6 +120,8 @@ class SystemVPN:
         self._emit("packet engine running: all TCP and DNS now travel through the overlay")
 
     def stop(self) -> None:
+        from . import netconfig
+
         self._running.clear()
         if self.engine is not None:
             self.engine.stop()
@@ -125,6 +149,7 @@ class SystemVPN:
             return
         if host.startswith("127."):
             return
+        from . import netconfig
         try:
             netconfig.replace_route(host, 32, gateway=self._gw, dev=self._dev)
             self._node_routes.add(host)
