@@ -58,11 +58,11 @@ jobs:
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name SpaceCopVPN `
-            --collect-submodules spacecop `
+            --paths . --hidden-import spacecop --collect-submodules spacecop `
             --add-binary "wintun\wintun.dll;." `
             packaging/windows/spacecop_gui_entry.py
           pyinstaller --noconfirm --clean --onefile --console --name spacecop `
-            --collect-submodules spacecop `
+            --paths . --hidden-import spacecop --collect-submodules spacecop `
             --add-binary "wintun\wintun.dll;." `
             packaging/windows/spacecop_cli_entry.py
           Get-ChildItem dist
