@@ -1,7 +1,7 @@
 # Maintainer: SpaceCopVPN contributors
 # Build with: packaging/arch/build.sh   (creates the source tarball and runs makepkg)
 pkgname=spacecopvpn
-pkgver=0.3.2
+pkgver=0.3.3
 pkgrel=1
 pkgdesc="From-scratch decentralised, incentivised VPN: CLI + graphical client (SOCKS5 tunnel)"
 arch=('x86_64' 'aarch64')

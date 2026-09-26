@@ -127,7 +127,11 @@ class SpaceCopVpnService : VpnService() {
                 val h = mod.callAttr("run_engine", pfd.fd, uris.toTypedArray(), dns, discover, PyLogger())
                 handle = h
                 state = "on"
-                appendLog("crypto: " + py.getModule("spacecop.crypto.aead").callAttr("backend").toString())
+                val backend = py.getModule("spacecop.crypto.aead").callAttr("backend").toString()
+                appendLog("crypto: $backend")
+                if (!backend.startsWith("native")) {
+                    appendLog(py.getModule("spacecop.crypto.native").callAttr("diagnostics").toString())
+                }
                 updateNotification("Подключено · узлов: ${uris.size}")
                 startPoller(h)
             } catch (e: Exception) {

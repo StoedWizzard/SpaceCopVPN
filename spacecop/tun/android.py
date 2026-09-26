@@ -158,9 +158,32 @@ def run_engine(fd: int, uris: list, dns: str = "1.1.1.1:53", discover: bool = Tr
         raise RuntimeError("ни один узел не ответил (проверьте строку подключения и интернет)")
 
     host, _, port = dns.rpartition(":")
+    dns_host, dns_port = host or "1.1.1.1", int(port or 53)
+
+    # Self-test: prove the overlay works from this device before blaming DNS.
+    # Logs every known node with its software version, then tries to open one
+    # real stream to the DNS resolver. If this fails, DNS will too — and the
+    # reason (old node, unreachable, timeout) is right here in the log.
+    try:
+        conns = client.connections()
+        emit(f"self-test: {len(conns)} node(s) known")
+        for cn in conns:
+            ver = getattr(cn, "version", "") or "old (<0.2, no streams)"
+            emit(f"  node {cn.addr[0]}:{cn.addr[1]} version {ver}")
+        try:
+            s = client.open_stream(dns_host, dns_port, timeout=8.0)
+            s.close()
+            emit(f"self-test OK: stream to DNS {dns_host}:{dns_port} opened — overlay works")
+        except Exception as exc:
+            emit(f"self-test FAILED: stream to DNS {dns_host}:{dns_port}: {exc}")
+            emit("→ если тут 'no answer', узел старый или не тот; обновите ВСЕ узлы "
+                 "или уберите старые из строк подключения")
+    except Exception as exc:
+        emit(f"self-test error: {exc}")
+
     tun = FileDescriptorTun(fd, mtu=1400, close_fd=False)
     engine = PacketEngine(tun, client, gateway_ip="10.77.0.1",
-                          dns_server=(host or "1.1.1.1", int(port or 53)), on_event=emit)
+                          dns_server=(dns_host, dns_port), on_event=emit)
     engine.start()
     emit("packet engine running — весь трафик идёт через VPN")
 

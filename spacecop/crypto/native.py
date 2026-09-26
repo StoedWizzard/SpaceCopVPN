@@ -37,18 +37,26 @@ _tried = False
 GIL_RELEASE_THRESHOLD = 32 * 1024
 _path: Optional[str] = None
 _extra_dirs: List[str] = []
+_errors: List[str] = []       # why each attempted candidate was rejected
 
 
 def set_native_dir(path: str) -> None:
     """Add a directory to search (call before first use; resets the cache)."""
-    global _tried, _lib
+    global _tried, _lib, _lib_gil
     if path and path not in _extra_dirs:
         _extra_dirs.insert(0, path)
     _tried = False
-    _lib = None
+    _lib = _lib_gil = None
 
 
 def _candidates() -> List[str]:
+    """Candidate library locations, best first.
+
+    Includes both absolute paths (checked for existence) and *bare sonames*
+    handed straight to the dynamic linker.  The bare names matter on Android,
+    where with the default ``extractNativeLibs=false`` the ``.so`` lives inside
+    the APK (no file on disk), so only ``dlopen("libspacecop_crypto.so")`` via
+    the linker's search path finds it."""
     out: List[str] = []
     env = os.environ.get("SPACECOP_NATIVE")
     dirs: List[str] = []
@@ -65,10 +73,16 @@ def _candidates() -> List[str]:
     dirs.append(os.path.dirname(os.path.abspath(sys.executable)))
     for d in dirs:
         for name in _NAMES:
-            out.append(os.path.join(d, name))
+            path = os.path.join(d, name)
+            if os.path.isfile(path):
+                out.append(path)
     found = ctypes.util.find_library("spacecop_crypto")
     if found:
         out.append(found)
+    # Bare sonames, resolved by the dynamic linker (Android, or any system
+    # library path). Attempted even when no file is visible on disk.
+    for name in _NAMES:
+        out.append(name)
     return out
 
 
@@ -92,19 +106,31 @@ def load() -> Optional[ctypes.CDLL]:
     if _tried:
         return _lib
     _tried = True
+    _errors.clear()
     if os.environ.get("SPACECOP_PURE"):
+        _errors.append("SPACECOP_PURE set: forced pure Python")
         return None
+    seen = set()
     for cand in _candidates():
-        if not os.path.isfile(cand):
+        if cand in seen:
             continue
+        seen.add(cand)
         try:
             lib = ctypes.CDLL(cand)
             _bind(lib)
-            lib.sc_version()
+            lib.sc_version()          # proves the symbols are really there
+        except (OSError, AttributeError) as exc:
+            _errors.append(f"{cand}: {exc}")
+            continue
+        # A second handle that keeps the GIL for small buffers. If PyDLL is
+        # unavailable (some embeddings), reuse the CDLL handle rather than
+        # dropping the whole library.
+        try:
             lib_gil = ctypes.PyDLL(cand)
             _bind(lib_gil)
-        except (OSError, AttributeError):
-            continue
+        except (OSError, AttributeError) as exc:
+            _errors.append(f"PyDLL {cand}: {exc} (using CDLL for small buffers)")
+            lib_gil = lib
         _lib, _lib_gil, _path = lib, lib_gil, cand
         break
     return _lib
@@ -122,6 +148,16 @@ def path() -> Optional[str]:
 def version() -> Optional[str]:
     lib = load()
     return lib.sc_version().decode() if lib else None
+
+
+def diagnostics() -> str:
+    """One line for logs: the chosen library, or the candidates tried and why
+    each was rejected.  Used by the Android app when the backend is Python."""
+    load()
+    if _path:
+        return f"native crypto loaded from {_path}"
+    tried = "; ".join(_errors) if _errors else "no candidates found"
+    return f"native crypto NOT loaded; tried: {tried}"
 
 
 def disable() -> None:

@@ -21,7 +21,7 @@
 #  define SC_EXPORT __attribute__((visibility("default")))
 #endif
 
-#define SC_VERSION "0.3.2"
+#define SC_VERSION "0.3.3"
 
 /* ------------------------------------------------------------------ utils */
 
