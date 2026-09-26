@@ -31,9 +31,11 @@ chaquopy {
         version = "3.11"
         // Python used at build time (CI installs 3.11 via actions/setup-python).
         buildPython("python3")
-        // Bundle the SpaceCopVPN package from the repository root (stdlib-only,
-        // so no wheels are needed).  Path is relative to this module (app/).
-        pip { install("../..") }
+        // The SpaceCopVPN package is stdlib-only, so it is bundled as plain
+        // sources from app/src/main/python (Chaquopy's default source set).
+        // Run ../sync_python.sh (CI does) to copy ../../spacecop there.
+        // NOTE: do not `pip install` the repository root — Gradle then treats
+        // the whole tree (including build outputs) as a task input and fails.
     }
 }
 

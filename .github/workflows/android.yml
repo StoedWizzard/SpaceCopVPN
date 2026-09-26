@@ -49,6 +49,9 @@ jobs:
         with:
           gradle-version: "8.7"
 
+      - name: Bundle the Python package into the app
+        run: bash android/sync_python.sh
+
       - name: Build
         working-directory: android
         run: gradle --no-daemon assembleDebug

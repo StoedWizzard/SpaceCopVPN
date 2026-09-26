@@ -20,9 +20,14 @@ Artifacts → `SpaceCopVPN-debug-apk` (или Releases для тегов). На 
 
 ```
 cd android
+./sync_python.sh               # копирует ../spacecop в app/src/main/python
 gradle assembleDebug           # или через Android Studio; результат:
                                # app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Пакет кладётся в приложение как исходники (стандартный Python-каталог
+Chaquopy), а не через `pip install` из корня репозитория: иначе Gradle
+считает весь репозиторий входом задачи и падает на валидации.
 
 `app/build.gradle.kts` устанавливает пакет `spacecopvpn` из корня репозитория
 (`pip { install("..") }`), поэтому в APK попадает текущий код.
