@@ -152,6 +152,48 @@ def cmd_relay(args) -> int:
     return 0
 
 
+def cmd_ping(args) -> int:
+    """Reachability + handshake diagnostics for a node."""
+    from .client import RelayTimeout, VPNClient
+    from .protocol import HandshakeError
+
+    targets = _node_targets(args) if (args.uri or args.node_key) else None
+    if targets is None:
+        # --node host:port without a key: reachability only.
+        host, port = _parse_hostport(args.node)
+        addr = (host, port)
+        x_public = None
+    else:
+        target = targets[0]
+        addr, x_public = target.address, target.x_public
+        expected = target.ed_public
+
+    client = VPNClient()
+    client.start()
+    try:
+        rtt = client.ping(addr, timeout=args.timeout)
+        if rtt is None:
+            print(f"[ping] {addr[0]}:{addr[1]}  NO REPLY — node not running, or UDP port "
+                  f"blocked (provider firewall / security group), or wrong host:port")
+            return 1
+        print(f"[ping] {addr[0]}:{addr[1]}  PONG in {rtt * 1000:.0f} ms — UDP reachable")
+        if x_public is None:
+            return 0
+        try:
+            conn = client.connect(x_public, addr, expected_node_ed=expected, timeout=args.timeout)
+            print(f"[handshake] OK — node identity {conn.node_id_hex()}")
+            return 0
+        except HandshakeError as exc:
+            print(f"[handshake] REJECTED — {exc}")
+            print("            (check the keys in the URI, and the clocks on both machines)")
+            return 2
+        except RelayTimeout as exc:
+            print(f"[handshake] TIMEOUT — {exc}")
+            return 3
+    finally:
+        client.stop()
+
+
 def cmd_gui(args) -> int:
     from .gui.app import main as gui_main
 
@@ -204,6 +246,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_relay.add_argument("--stdin", action="store_true", help="read request body from stdin")
     p_relay.add_argument("--timeout", type=float, default=15.0)
     p_relay.set_defaults(func=cmd_relay)
+
+    p_ping = sub.add_parser("ping", help="check that a node is reachable and accepts handshakes")
+    add_client_args(p_ping)
+    p_ping.add_argument("--timeout", type=float, default=4.0)
+    p_ping.set_defaults(func=cmd_ping)
 
     p_gui = sub.add_parser("gui", help="launch the graphical client")
     p_gui.set_defaults(func=cmd_gui)

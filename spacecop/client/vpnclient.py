@@ -41,6 +41,13 @@ class _PendingHandshake:
     addr: Address
     event: threading.Event = field(default_factory=threading.Event)
     session: Optional[Session] = None
+    error: str = ""  # reason reported by the node (MSG_ERROR) or verification failure
+
+
+@dataclass
+class _PendingPing:
+    event: threading.Event = field(default_factory=threading.Event)
+    rtt: float = 0.0
 
 
 @dataclass
@@ -60,6 +67,7 @@ class VPNClient:
         self._reassemblers: Dict[bytes, Reassembler] = {}
         self._pending_handshakes: Dict[bytes, _PendingHandshake] = {}
         self._pending_requests: Dict[bytes, _PendingRequest] = {}
+        self._pending_pings: Dict[bytes, _PendingPing] = {}
         self._selector = NodeSelector()
         self._lock = threading.Lock()
         self._receipt_seq = 0
@@ -78,16 +86,29 @@ class VPNClient:
         pending = _PendingHandshake(handshake=handshake, addr=addr)
         with self._lock:
             self._pending_handshakes[handshake.session_id] = pending
-        self.transport.send(handshake.build_init(), addr)
 
-        if not pending.event.wait(timeout):
+        # Re-send the INIT every second until we get an answer: a single lost
+        # UDP datagram must not turn into a "node unreachable" verdict.  The
+        # INIT carries a timestamp, so each copy is rebuilt fresh.
+        deadline = time.monotonic() + timeout
+        answered = False
+        while time.monotonic() < deadline:
+            self.transport.send(handshake.build_init(), addr)
+            if pending.event.wait(min(1.0, max(0.05, deadline - time.monotonic()))):
+                answered = True
+                break
+
+        if not answered:
             with self._lock:
                 self._pending_handshakes.pop(handshake.session_id, None)
-            raise RelayTimeout("handshake timed out")
+            raise RelayTimeout(
+                "handshake timed out: no reply from the node "
+                "(node not running, UDP port blocked by a firewall/provider, or wrong host:port)")
 
         session = pending.session
         if session is None:
-            raise HandshakeError("node response failed verification "
+            raise HandshakeError(
+                pending.error or "node response failed verification "
                                  "(wrong key, wrong identity, or tampering)")
         conn = NodeConnection(session=session, addr=addr,
                               node_ed_public=session.peer_identity)
@@ -216,6 +237,51 @@ class VPNClient:
             self._handle_data(body)
         elif msg_type == c.MSG_PEER_LIST:
             self._handle_peer_list(body)
+        elif msg_type == c.MSG_ERROR:
+            self._handle_error(body)
+        elif msg_type == c.MSG_PONG:
+            self._handle_pong(body)
+
+    # -- diagnostics --------------------------------------------------------
+    def ping(self, addr: Address, timeout: float = 3.0, attempts: int = 3) -> Optional[float]:
+        """Reachability probe: return the round-trip time in seconds, or None.
+
+        Uses the protocol PING, which a node answers without any cryptography
+        or clock check — so "no PONG" means the node is down or the UDP port
+        is not reachable, and "PONG but handshake fails" points at keys/clock.
+        """
+        token = os.urandom(8)
+        pending = _PendingPing()
+        with self._lock:
+            self._pending_pings[token] = pending
+        try:
+            per_try = max(0.2, timeout / max(1, attempts))
+            for _ in range(attempts):
+                started = time.monotonic()
+                self.transport.send(framing.encode_frame(c.MSG_PING, token), addr)
+                if pending.event.wait(per_try):
+                    return time.monotonic() - started
+            return None
+        finally:
+            with self._lock:
+                self._pending_pings.pop(token, None)
+
+    def _handle_pong(self, body: bytes) -> None:
+        with self._lock:
+            pending = self._pending_pings.get(body[:8])
+        if pending is not None:
+            pending.event.set()
+
+    def _handle_error(self, body: bytes) -> None:
+        if len(body) < 8:
+            return
+        session_id, reason = body[:8], body[8:].decode("utf-8", "replace")
+        with self._lock:
+            pending = self._pending_handshakes.pop(session_id, None)
+        if pending is not None:
+            pending.error = f"node rejected the handshake: {reason}"
+            pending.session = None
+            pending.event.set()
 
     def _handle_handshake_resp(self, body: bytes) -> None:
         if len(body) < 8:

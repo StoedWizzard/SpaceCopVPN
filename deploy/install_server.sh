@@ -157,7 +157,10 @@ User=spacecop
 Group=spacecop
 EnvironmentFile=$CONF_DIR/node.env
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$PY -m spacecop.cli node --bind 0.0.0.0 --port \${SPACECOP_PORT} --advertise \${SPACECOP_ADVERTISE} --identity $IDENTITY \${SPACECOP_EXTRA_ARGS}
+# NOTE: \$SPACECOP_EXTRA_ARGS is deliberately WITHOUT braces: systemd passes
+# \${VAR} as one argument even when empty (an empty '' argument breaks
+# argparse), while \$VAR is word-split and yields no arguments when empty.
+ExecStart=$PY -m spacecop.cli node --bind 0.0.0.0 --port \${SPACECOP_PORT} --advertise \${SPACECOP_ADVERTISE} --identity $IDENTITY \$SPACECOP_EXTRA_ARGS
 Restart=always
 RestartSec=3
 # Hardening
@@ -173,8 +176,27 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now "$SERVICE"
-  sleep 1
-  systemctl --no-pager --lines=5 status "$SERVICE" || true
+  # Verify the node really came up (a bad argument or port clash would
+  # otherwise leave systemd restart-looping while we print a success banner).
+  ok=0
+  for _ in 1 2 3 4 5 6; do
+    sleep 1
+    if systemctl is-active --quiet "$SERVICE"; then ok=1; fi
+  done
+  if [[ $ok -eq 1 ]] && systemctl is-active --quiet "$SERVICE"; then
+    log "Service $SERVICE is active"
+  else
+    echo
+    warn "service $SERVICE is NOT running. Last log lines:"
+    journalctl -u "$SERVICE" --no-pager -n 20 || true
+    die "node failed to start; fix the error above and run: systemctl restart $SERVICE"
+  fi
+  # Local reachability: a protocol PING must get a PONG back through the socket.
+  if ! (cd "$INSTALL_DIR" && "$PY" -m spacecop.cli ping --node "127.0.0.1:$PORT" --timeout 3 >/dev/null 2>&1); then
+    warn "node did not answer a local PING on udp/$PORT yet (it may still be starting)."
+  else
+    log "Node answers PING on udp/$PORT"
+  fi
 else
   warn "systemd not found; start the node manually:"
   warn "  cd $INSTALL_DIR && $PY -m spacecop.cli node --port $PORT --advertise $ADVERTISE --identity $IDENTITY$EXTRA_ARGS"

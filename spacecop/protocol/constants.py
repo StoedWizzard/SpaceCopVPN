@@ -37,6 +37,7 @@ MSG_RECEIPT = 0x21          # signed proof-of-relay receipt (earns points)
 MSG_SCORE_QUERY = 0x22      # ask a node for its current score ledger
 MSG_SCORE_REPORT = 0x23     # a node reports its accumulated score
 MSG_RELAY_RESPONSE = 0x24   # a node returns the relayed destination's reply
+MSG_ERROR = 0x7F            # node -> client: why a request was rejected (in the clear)
 
 MESSAGE_NAMES = {
     MSG_HANDSHAKE_INIT: "HANDSHAKE_INIT",
@@ -84,4 +85,4 @@ HKDF_SALT_TRANSCRIPT = b"spacecop/v1 handshake"
 REPLAY_WINDOW = 1024
 
 # Anti-replay / freshness: reject handshakes whose timestamp skews more than this.
-MAX_CLOCK_SKEW_SECONDS = 120
+MAX_CLOCK_SKEW_SECONDS = 300

@@ -181,7 +181,16 @@ class RelayNode:
     def _handle_handshake(self, body: bytes, addr: Address) -> None:
         try:
             resp_frame, session = self._handshaker.handle_init(body)
-        except Exception:
+        except Exception as exc:
+            # Tell the client *why* (in the clear, no secrets): a silent drop
+            # is indistinguishable from an unreachable node.  Echo the session
+            # id so the client can match it to its pending handshake.
+            sid = body[:8] if len(body) >= 8 else b"\x00" * 8
+            reason = str(exc).encode("utf-8", "replace")[:200]
+            try:
+                self.transport.send(framing.encode_frame(c.MSG_ERROR, sid + reason), addr)
+            except OSError:
+                pass
             return
         with self._lock:
             self._sessions[session.session_id] = _SessionState(session=session, addr=addr)

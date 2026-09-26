@@ -118,6 +118,8 @@ class App:
         self.e_uri.grid(row=1, column=0, columnspan=2, sticky="ew", **pad)
         ttk.Button(f_nodes, text="Добавить узел", command=self._add_node).grid(row=1, column=2, **pad)
         ttk.Button(f_nodes, text="Удалить узел", command=self._remove_node).grid(row=1, column=3, **pad)
+        self.btn_check = ttk.Button(f_nodes, text="Проверить узел", command=self._check_node)
+        self.btn_check.grid(row=1, column=4, **pad)
         ttk.Label(f_nodes, foreground="#555",
                   text="Вставьте строку, которую узел печатает при запуске "
                        "(или выдаёт скрипт установки сервера).").grid(
@@ -251,6 +253,52 @@ class App:
         if sel:
             self.lb_nodes.delete(sel[0])
 
+    # -- node diagnostics ---------------------------------------------------
+    def _check_node(self) -> None:
+        """Ping + handshake the URI in the entry (or the selected list item)."""
+        if self._busy:
+            return
+        text = self.e_uri.get().strip()
+        if not text:
+            sel = self.lb_nodes.curselection()
+            if sel:
+                text = self.lb_nodes.get(sel[0])
+        if not text:
+            messagebox.showinfo(APP_TITLE, "Вставьте строку подключения или выберите узел в списке.")
+            return
+        try:
+            target = parse_uri(text)
+        except URIError as exc:
+            messagebox.showerror(APP_TITLE, f"Неверная строка подключения:\n{exc}")
+            return
+        self._set_busy(True, "Статус: проверка узла…", "#a60")
+        self.btn_check["state"] = "disabled"
+        threading.Thread(target=self._check_node_worker, args=(target,), daemon=True).start()
+
+    def _check_node_worker(self, target) -> None:
+        client = VPNClient()
+        client.start()
+        try:
+            rtt = client.ping(target.address, timeout=4.0)
+            if rtt is None:
+                self._post("check_done", (False,
+                    f"{target.host}:{target.port}: узел НЕ отвечает по UDP. Проверьте на сервере: "
+                    f"systemctl status spacecop-node, ss -ulnp | grep {target.port}, и что UDP/{target.port} "
+                    f"открыт в файрволе провайдера (security group)."))
+                return
+            try:
+                conn = client.connect(target.x_public, target.address,
+                                      expected_node_ed=target.ed_public, timeout=6.0)
+                self._post("check_done", (True,
+                    f"{target.host}:{target.port}: PONG за {rtt * 1000:.0f} мс, рукопожатие OK, "
+                    f"узел {conn.node_id_hex()}."))
+            except Exception as exc:
+                self._post("check_done", (False,
+                    f"{target.host}:{target.port}: узел достижим (PONG {rtt * 1000:.0f} мс), "
+                    f"но рукопожатие отклонено: {exc}. Проверьте ключи в строке и часы на обеих машинах."))
+        finally:
+            client.stop()
+
     # -- connect / disconnect / test ----------------------------------------
     def _connect(self) -> None:
         if self._busy or self.client is not None:
@@ -368,6 +416,14 @@ class App:
             self._set_busy(False)
             self._set_status("Статус: ошибка подключения", "#a00")
             self._log(f"Подключение не удалось: {payload}")
+        elif kind == "check_done":
+            ok, text = payload
+            self._set_busy(False)
+            self.btn_check["state"] = "normal"
+            if self.client is None:
+                self._set_status("Статус: узел проверен" if ok else "Статус: узел недоступен",
+                                 "#080" if ok else "#a00")
+            self._log(("✓ " if ok else "✗ ") + text)
         elif kind == "test_done":
             self._set_busy(False)
             if self.client is not None:
