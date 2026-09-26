@@ -10,6 +10,7 @@ against a sliding window so replayed packets are dropped.
 from __future__ import annotations
 
 import struct
+import threading
 
 from ..crypto import aead
 from . import constants as c
@@ -48,12 +49,18 @@ class Session:
         self._send_counter = 0
         self._recv_high = 0            # highest counter accepted so far
         self._recv_window = 0          # bitmask of recently seen counters
+        # seal() may be called from several threads (e.g. concurrent SOCKS
+        # connections).  The counter must be reserved atomically, otherwise two
+        # records could share a nonce, which would be catastrophic for AEAD.
+        self._send_lock = threading.Lock()
+        self._recv_lock = threading.Lock()
 
     # -- outbound -----------------------------------------------------------
     def seal(self, plaintext: bytes, aad: bytes = b"") -> bytes:
         """Encrypt ``plaintext``; returns ``counter(8) || ciphertext || tag``."""
-        counter = self._send_counter
-        self._send_counter += 1
+        with self._send_lock:
+            counter = self._send_counter
+            self._send_counter += 1
         nonce = _nonce_from_counter(counter)
         # Bind the counter into the associated data so it cannot be moved.
         full_aad = aad + struct.pack("!Q", counter)
@@ -66,12 +73,15 @@ class Session:
         if len(framed) < 8 + c.TAG_SIZE:
             raise aead.AuthenticationError("sealed record too short")
         (counter,) = struct.unpack("!Q", framed[:8])
-        self._check_replay(counter)
+        with self._recv_lock:
+            self._check_replay(counter)
         nonce = _nonce_from_counter(counter)
         full_aad = aad + struct.pack("!Q", counter)
         plaintext = aead.decrypt(self.recv_key, nonce, framed[8:], full_aad)
         # Only mark the counter as seen after successful authentication.
-        self._accept(counter)
+        with self._recv_lock:
+            self._check_replay(counter)  # re-check: another thread may have accepted it
+            self._accept(counter)
         return plaintext
 
     # -- sliding-window replay protection -----------------------------------

@@ -1,0 +1,37 @@
+# Maintainer: SpaceCopVPN contributors
+# Build with: packaging/arch/build.sh   (creates the source tarball and runs makepkg)
+pkgname=spacecopvpn
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="From-scratch decentralised, incentivised VPN: CLI + graphical client (SOCKS5 tunnel)"
+arch=('any')
+url="https://github.com/StoedWizzard/SpaceCopVPN"
+license=('MIT')
+depends=('python' 'tk')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+optdepends=('python-pytest: run the test-suite')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$srcdir/$pkgname-$pkgver"
+  # Fast, network-free subset (crypto vectors, protocol, fragmentation, scoring).
+  python -m unittest tests.test_crypto tests.test_protocol tests.test_fragmentation tests.test_node
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  install -Dm644 packaging/spacecop-gui.desktop \
+    "$pkgdir/usr/share/applications/spacecop-gui.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 README.ru.md "$pkgdir/usr/share/doc/$pkgname/README.ru.md"
+  install -Dm755 deploy/install_server.sh "$pkgdir/usr/share/$pkgname/install_server.sh"
+}

@@ -37,7 +37,28 @@ them.
 6. The reply is wrapped in a `RELAY_RESPONSE`, fragmented, shuffled, sealed, and
    sent back; the client reassembles it and returns it to the caller.
 7. The client signs a `RECEIPT` for the bytes relayed and sends it to the node,
-   which records it in its ledger (see SCORING.md).
+   which records it in its ledger (see SCORING.md). Receipts are issued only
+   for successful relays.
+
+## Throughput, loss recovery, and IP consistency
+
+* **Worker pool.** The node hands each reassembled request to a pool of 64
+  worker threads; the UDP receive loop only decrypts and reassembles, so a slow
+  destination never stalls other clients. Web pages that fire hundreds of
+  requests at once are the normal case (the test-suite runs 300 concurrently).
+* **Retransmission.** If no reply arrives within 2 s the client re-sends the
+  *identical* sealed fragments (up to twice). This is safe by construction: the
+  replay window drops copies already seen, the reassembler ignores duplicate
+  fragments, and the node keeps finished responses in a 60 s cache keyed by
+  `(session_id, request_id)` so a retransmit is answered from cache rather than
+  by contacting the destination a second time; retransmits of a request still
+  in flight are coalesced.
+* **One site, one node.** The client's selector pins each *site* (registrable
+  domain such as `example.com` for `cdn.example.com`, or the IP literal) to the
+  node first chosen for it and keeps routing that site through the same node,
+  so the destination sees one stable IP for the whole session. The pin breaks
+  only if that node fails, is removed, or has been idle for 30 minutes.
+  Different sites still spread across nodes, so competition is preserved.
 
 ## Decentralisation
 

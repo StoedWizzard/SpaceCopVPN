@@ -67,6 +67,62 @@ class NodeIdentity:
         """Serialise the public identity (Ed25519 pub || X25519 pub)."""
         return self.ed_public + self.x_public
 
+    # -- persistence --------------------------------------------------------
+    def save(self, path: str) -> None:
+        """Write the identity to ``path`` as JSON (private keys included).
+
+        A node's identity must survive restarts, otherwise clients that pinned
+        its keys can no longer connect and its accumulated score is orphaned.
+        The file is created with owner-only permissions.
+        """
+        import json
+        import os
+
+        data = {
+            "version": 1,
+            "ed25519_private": self.ed_private.hex(),
+            "ed25519_public": self.ed_public.hex(),
+            "x25519_private": self.x_private.hex(),
+            "x25519_public": self.x_public.hex(),
+        }
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp, path)
+
+    @classmethod
+    def load(cls, path: str) -> "NodeIdentity":
+        import json
+
+        with open(path, "r") as fh:
+            data = json.load(fh)
+        ident = cls(
+            ed_private=bytes.fromhex(data["ed25519_private"]),
+            ed_public=bytes.fromhex(data["ed25519_public"]),
+            x_private=bytes.fromhex(data["x25519_private"]),
+            x_public=bytes.fromhex(data["x25519_public"]),
+        )
+        # Sanity: public keys must match the private keys on disk.
+        if ed25519.public_key_from_private(ident.ed_private) != ident.ed_public:
+            raise HandshakeError("identity file corrupt: ed25519 keys mismatch")
+        if x25519.scalar_base_mult(ident.x_private) != ident.x_public:
+            raise HandshakeError("identity file corrupt: x25519 keys mismatch")
+        return ident
+
+    @classmethod
+    def load_or_create(cls, path: str) -> "NodeIdentity":
+        """Load an identity from ``path``, creating and saving one if missing."""
+        import os
+
+        if os.path.exists(path):
+            return cls.load(path)
+        ident = cls.generate()
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+        ident.save(path)
+        return ident
+
     @staticmethod
     def parse_bundle(data: bytes):
         if len(data) != c.ED25519_PUB_SIZE + c.KEY_SIZE:
@@ -85,8 +141,15 @@ def _transcript_hash(sid: bytes, e_c_pub: bytes, e_n_pub: bytes, node_static_pub
     return h.digest()
 
 
+_ZERO_SECRET = b"\x00" * c.KEY_SIZE
+
+
 def _derive_keys(ss_static: bytes, ss_eph: bytes, transcript: bytes):
     """Return (k_client_to_node, k_node_to_client, k_confirm)."""
+    # RFC 7748 section 6.1: a peer that sends a low-order point makes the
+    # shared secret all zeros; such a handshake must be rejected.
+    if ss_static == _ZERO_SECRET or ss_eph == _ZERO_SECRET:
+        raise HandshakeError("degenerate (all-zero) shared secret; low-order peer key")
     prk = hkdf.extract(transcript, ss_static + ss_eph)
     okm = hkdf.expand(prk, c.HKDF_INFO_SESSION, 3 * c.SESSION_KEY_SIZE)
     return (

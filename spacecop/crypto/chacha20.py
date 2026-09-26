@@ -95,8 +95,14 @@ def chacha20_keystream(key: bytes, counter: int, nonce: bytes, length: int) -> b
 
 def chacha20_xor(key: bytes, counter: int, nonce: bytes, data: bytes) -> bytes:
     """Encrypt or decrypt ``data`` (the operation is symmetric)."""
+    if not data:
+        return b""
     keystream = chacha20_keystream(key, counter, nonce, len(data))
-    return bytes(a ^ b for a, b in zip(data, keystream))
+    # XOR as two big integers: one C-level operation instead of a Python loop
+    # over every byte, which is a large speed-up for 20 KB fragments.
+    n = len(data)
+    xored = int.from_bytes(data, "little") ^ int.from_bytes(keystream, "little")
+    return xored.to_bytes(n, "little")
 
 
 # Backwards-friendly aliases

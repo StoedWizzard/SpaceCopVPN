@@ -11,6 +11,7 @@ and encrypted before they hit the wire; replies are reassembled locally.
 from __future__ import annotations
 
 import os
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -18,7 +19,7 @@ from typing import Dict, List, Optional
 
 from ..crypto import ed25519
 from ..fragmentation import Fragmenter, Reassembler
-from ..protocol import ClientHandshake, Session, constants as c, framing
+from ..protocol import ClientHandshake, HandshakeError, Session, constants as c, framing
 from ..protocol.messages import (
     DataMessage,
     PeerList,
@@ -85,6 +86,9 @@ class VPNClient:
             raise RelayTimeout("handshake timed out")
 
         session = pending.session
+        if session is None:
+            raise HandshakeError("node response failed verification "
+                                 "(wrong key, wrong identity, or tampering)")
         conn = NodeConnection(session=session, addr=addr,
                               node_ed_public=session.peer_identity)
         with self._lock:
@@ -96,13 +100,22 @@ class VPNClient:
     # -- relaying -----------------------------------------------------------
     def relay(self, dest_host: str, dest_port: int, blob: bytes,
               via: Optional[NodeConnection] = None, timeout: float = 10.0,
-              issue_receipt: bool = True) -> bytes:
+              issue_receipt: bool = True, retries: int = 2,
+              retry_interval: float = 2.0) -> bytes:
         """Send ``blob`` to (dest_host, dest_port) through a node; return the reply.
 
-        If ``via`` is None the client lets the selector pick a competing node.
-        On success it signs and sends a proof-of-relay receipt to that node.
+        If ``via`` is None the selector picks a node — and keeps picking the
+        *same* node for the same site, so a web site sees one stable IP for
+        the whole session.  On success the client signs and sends a
+        proof-of-relay receipt to that node.
+
+        Lost datagrams are recovered by re-sending the identical sealed
+        fragments (``retries`` times, every ``retry_interval`` seconds).  This
+        is safe: the receiver's replay window rejects copies it already saw,
+        the reassembler ignores duplicate fragments, and the node replays a
+        cached response instead of contacting the destination twice.
         """
-        conn = via or self._selector.choose()
+        conn = via or self._selector.choose(dest_host)
         if conn is None:
             raise RelayTimeout("no node connections available")
 
@@ -113,12 +126,28 @@ class VPNClient:
 
         req = RelayRequest(request_id, dest_host, dest_port, blob).encode()
         started = time.monotonic()
-        self._send_app_message(conn, req)
+        datagrams = self._send_app_message(conn, req)
 
-        if not pending.event.wait(timeout):
+        deadline = started + timeout
+        attempt = 0
+        got = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            wait_for = min(remaining, retry_interval) if attempt < retries else remaining
+            if pending.event.wait(wait_for):
+                got = True
+                break
+            if attempt >= retries:
+                break
+            attempt += 1
+            self._resend(conn, datagrams)
+
+        if not got:
             with self._lock:
                 self._pending_requests.pop(request_id, None)
-            self._selector.record_failure(conn)
+            self._selector.record_failure(conn, dest_host)
             raise RelayTimeout("relay request timed out")
 
         elapsed = time.monotonic() - started
@@ -126,12 +155,17 @@ class VPNClient:
         with self._lock:
             self._pending_requests.pop(request_id, None)
 
+        if resp.status != 0:
+            # The node answered but could not reach the destination.  Do not
+            # reward it for work it did not complete, and unpin the site so the
+            # next attempt may try another node.
+            self._selector.record_failure(conn, dest_host)
+            raise RelayTimeout(f"relay failed with status {resp.status}: {resp.blob!r}")
+
         relayed = len(blob) + len(resp.blob)
         self._selector.record_success(conn, elapsed, relayed)
         if issue_receipt and conn.node_ed_public:
             self._send_receipt(conn, relayed)
-        if resp.status != 0:
-            raise RelayTimeout(f"relay failed with status {resp.status}: {resp.blob!r}")
         return resp.blob
 
     def _send_receipt(self, conn: NodeConnection, byte_count: int) -> None:
@@ -150,11 +184,25 @@ class VPNClient:
         except OSError:
             pass
 
-    def _send_app_message(self, conn: NodeConnection, inner_frame: bytes) -> None:
+    def _send_app_message(self, conn: NodeConnection, inner_frame: bytes) -> List[bytes]:
+        """Fragment, shuffle, seal and send; return the datagrams for retransmission."""
+        datagrams = []
         for raw in self.fragmenter.fragment_encoded(inner_frame, shuffle=True):
             sealed = conn.session.seal(raw)
             datagram = DataMessage(conn.session.session_id, sealed).encode()
+            datagrams.append(datagram)
             self.transport.send(datagram, conn.addr)
+        return datagrams
+
+    def _resend(self, conn: NodeConnection, datagrams: List[bytes]) -> None:
+        """Re-send identical sealed fragments in a fresh random order."""
+        order = list(datagrams)
+        random.SystemRandom().shuffle(order)
+        for datagram in order:
+            try:
+                self.transport.send(datagram, conn.addr)
+            except OSError:
+                break
 
     # -- receive path -------------------------------------------------------
     def _on_datagram(self, data: bytes, addr: Address) -> None:

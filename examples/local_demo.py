@@ -22,11 +22,11 @@ from spacecop.node.scoring import Ledger
 
 
 class EchoServer:
-    def __init__(self):
+    def __init__(self, host="127.0.0.1"):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(16)
+        self._sock.bind((host, 0))
+        self._sock.listen(512)
         self.host, self.port = self._sock.getsockname()
         self._running = True
         threading.Thread(target=self._serve, daemon=True).start()
@@ -64,8 +64,18 @@ class EchoServer:
 def main():
     print("SpaceCopVPN local demo")
     print("=" * 60)
-    echo = EchoServer()
-    print(f"echo destination on 127.0.0.1:{echo.port}")
+    # Several distinct "sites": one echo server per loopback address.  The
+    # client pins each site to one node (stable IP per site) while different
+    # sites spread across the competing nodes.  Addresses 127.0.0.2+ exist on
+    # Linux by default; fall back to a single site elsewhere.
+    sites = []
+    for i in range(1, 9):
+        try:
+            sites.append(EchoServer(f"127.0.0.{i}"))
+        except OSError:
+            break
+    print(f"{len(sites)} echo destination(s) (sites): "
+          + ", ".join(f"{s.host}:{s.port}" for s in sites))
 
     n_nodes = 4
     nodes = []
@@ -87,8 +97,9 @@ def main():
     print(f"sending {n_requests} relayed requests (fragmented, shuffled, encrypted)...")
     total_bytes = 0
     for i in range(n_requests):
+        site = sites[i % len(sites)]
         payload = os.urandom((i % 5 + 1) * 15 * 1024)  # 15..75 KB
-        response = client.relay(echo.host, echo.port, payload, timeout=20)
+        response = client.relay(site.host, site.port, payload, timeout=20)
         assert response == payload, "round-trip mismatch!"
         total_bytes += len(payload)
     print(f"all {n_requests} requests round-tripped correctly "
@@ -111,6 +122,11 @@ def main():
         print(f"{rank:<5}{node.node_id_hex:<20}{standing.points:<10}"
               f"{node.relayed_requests:<10}{mb:<12.2f}")
 
+    print("\nsite -> pinned node (every request to a site uses the same node = one IP):")
+    for site in sites:
+        conn = client._selector.pinned_node(site.host)
+        print(f"  {site.host:<12} -> {conn.node_id_hex() if conn else '-'}")
+
     print("\nclient's view of node health (latency-ranked):")
     for conn in client._selector.ranking():
         print(f"  {conn.node_id_hex():<20} health={conn.health_score():8.1f} "
@@ -119,7 +135,8 @@ def main():
     client.stop()
     for node in nodes:
         node.stop()
-    echo.stop()
+    for site in sites:
+        site.stop()
     print("\ndemo complete.")
 
 

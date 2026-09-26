@@ -15,11 +15,10 @@ Everything is driven by one UDP socket and a couple of background threads.
 
 from __future__ import annotations
 
-import os
 import socket
-import struct
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
@@ -49,6 +48,15 @@ from .scoring import Ledger
 RELAY_CONNECT_TIMEOUT = 5.0
 RELAY_READ_TIMEOUT = 5.0
 RELAY_MAX_RESPONSE = 4 * 1024 * 1024  # cap a single relayed reply at 4 MB
+# Sessions with no traffic for this long are dropped so memory stays bounded.
+SESSION_IDLE_TIMEOUT = 15 * 60.0
+# Relays run on a worker pool so one slow destination never blocks the UDP
+# receive loop or other clients.  Web pages issue many requests at once.
+RELAY_WORKERS = 64
+# Completed responses are remembered briefly so a retransmitted request (the
+# client re-sends fragments when it suspects loss) is answered from cache
+# instead of contacting the destination a second time.
+RESPONSE_CACHE_TTL = 60.0
 
 
 @dataclass
@@ -79,6 +87,12 @@ class RelayNode:
         self._lock = threading.Lock()
         self._gossip_thread: Optional[threading.Thread] = None
         self._running = threading.Event()
+        self._executor = ThreadPoolExecutor(max_workers=RELAY_WORKERS,
+                                            thread_name_prefix="spacecop-relay")
+        # (session_id, request_id) -> (encoded RelayResponse frame, timestamp)
+        self._response_cache: Dict[Tuple[bytes, bytes], Tuple[bytes, float]] = {}
+        # Requests currently being relayed, to coalesce retransmits in flight.
+        self._in_flight: set = set()
 
         # Counters for observability / the score analogy.
         self.relayed_bytes = 0
@@ -108,6 +122,7 @@ class RelayNode:
         self._running.clear()
         if self._gossip_thread is not None:
             self._gossip_thread.join(timeout=2.0)
+        self._executor.shutdown(wait=False)
         self.transport.stop()
 
     # -- self-announcement --------------------------------------------------
@@ -129,6 +144,8 @@ class RelayNode:
                 for peer in self.directory.sample(8):
                     self.transport.send(announce, peer.address())
                     self.transport.send(PeerRequest().encode(), peer.address())
+                self._expire_idle_sessions()
+                self._purge_response_cache()
             except Exception:
                 pass
             # Sleep in small increments so stop() is responsive.
@@ -210,11 +227,44 @@ class RelayNode:
             self._send_app_message(state, RelayResponse(req.request_id, 1, b"exit disabled").encode())
             return
 
-        status, blob = self._perform_tcp_relay(req.dest_host, req.dest_port, req.blob)
-        self.relayed_requests += 1
-        self.relayed_bytes += len(blob)
-        response = RelayResponse(req.request_id, status, blob).encode()
-        self._send_app_message(state, response)
+        key = (state.session.session_id, req.request_id)
+        with self._lock:
+            cached = self._response_cache.get(key)
+            if cached is not None:
+                response = cached[0]
+            elif key in self._in_flight:
+                return  # retransmit of a request we are already relaying
+            else:
+                self._in_flight.add(key)
+                response = None
+        if response is not None:
+            # Retransmitted request: replay the answer, do not hit the destination again.
+            self._send_app_message(state, response)
+            return
+        # Hand the blocking network work to the pool; the UDP loop stays free.
+        self._executor.submit(self._relay_worker, state, req, key)
+
+    def _relay_worker(self, state: _SessionState, req: RelayRequest, key) -> None:
+        try:
+            status, blob = self._perform_tcp_relay(req.dest_host, req.dest_port, req.blob)
+            response = RelayResponse(req.request_id, status, blob).encode()
+            with self._lock:
+                self.relayed_requests += 1
+                self.relayed_bytes += len(blob)
+                self._response_cache[key] = (response, time.monotonic())
+                self._in_flight.discard(key)
+            self._send_app_message(state, response)
+        except Exception:
+            with self._lock:
+                self._in_flight.discard(key)
+
+    def _purge_response_cache(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            stale = [k for k, (_, ts) in self._response_cache.items()
+                     if now - ts > RESPONSE_CACHE_TTL]
+            for k in stale:
+                del self._response_cache[k]
 
     def _perform_tcp_relay(self, host: str, port: int, blob: bytes) -> Tuple[int, bytes]:
         """Forward ``blob`` to (host, port) over TCP and return the reply."""
@@ -267,6 +317,9 @@ class RelayNode:
             req = PeerRequest()
         peer_list = self.directory.to_peer_list(req.max_peers)
         self.transport.send(peer_list.encode(), addr)
+        # Also introduce ourselves, so a peer that only knew our address as a
+        # bootstrap seed learns our real identity and the gossip converges.
+        self.transport.send(self.build_announce().encode(), addr)
 
     def _handle_peer_list(self, body: bytes, addr: Address) -> None:
         try:
@@ -295,3 +348,11 @@ class RelayNode:
     def active_sessions(self) -> int:
         with self._lock:
             return len(self._sessions)
+
+    def _expire_idle_sessions(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            stale = [sid for sid, st in self._sessions.items()
+                     if now - st.last_active > SESSION_IDLE_TIMEOUT]
+            for sid in stale:
+                del self._sessions[sid]

@@ -25,7 +25,9 @@ class EchoServer:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(8)
+        # Large backlog: the load test opens many connections at once and the
+        # echo server must not be the bottleneck being measured.
+        self._sock.listen(512)
         self.host, self.port = self._sock.getsockname()
         self._running = True
         self._thread = threading.Thread(target=self._serve, daemon=True)

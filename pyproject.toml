@@ -21,6 +21,7 @@ dependencies = []  # standard library only, by design
 
 [project.scripts]
 spacecop = "spacecop.cli:main"
+spacecop-gui = "spacecop.gui.app:main"
 
 [project.urls]
 Homepage = "https://github.com/stoedwizzard/spacecopvpn"

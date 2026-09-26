@@ -8,10 +8,11 @@ Layers:
 * :mod:`handshake` — the authenticated, forward-secret key exchange.
 """
 
-from . import constants, framing, handshake, messages, session
+from . import constants, framing, handshake, messages, session, uri
 from .framing import ProtocolError, decode_frame, encode_frame
 from .handshake import ClientHandshake, HandshakeError, NodeHandshake, NodeIdentity
 from .session import ReplayError, Session
+from .uri import NodeURI, URIError, build_uri, parse_uri
 
 __all__ = [
     "constants",
@@ -19,6 +20,11 @@ __all__ = [
     "handshake",
     "messages",
     "session",
+    "uri",
+    "NodeURI",
+    "URIError",
+    "build_uri",
+    "parse_uri",
     "ProtocolError",
     "encode_frame",
     "decode_frame",
