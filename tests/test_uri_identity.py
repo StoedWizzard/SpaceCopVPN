@@ -51,7 +51,8 @@ class TestIdentityPersistence(unittest.TestCase):
             path = os.path.join(d, "sub", "identity.json")
             os.makedirs(os.path.dirname(path))
             ident.save(path)
-            self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
+            if os.name == "posix":  # Windows has no POSIX mode bits
+                self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
             loaded = NodeIdentity.load(path)
             self.assertEqual(loaded.ed_private, ident.ed_private)
             self.assertEqual(loaded.x_public, ident.x_public)
@@ -68,8 +69,10 @@ class TestIdentityPersistence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "id.json")
             ident.save(path)
-            text = open(path).read().replace(ident.ed_public.hex(), "00" * 32)
-            open(path, "w").write(text)
+            with open(path, encoding="utf-8") as f:
+                text = f.read().replace(ident.ed_public.hex(), "00" * 32)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
             with self.assertRaises(HandshakeError):
                 NodeIdentity.load(path)
 
