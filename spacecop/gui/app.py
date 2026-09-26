@@ -41,6 +41,7 @@ DEFAULT_PROFILE = {
     "listen_host": "127.0.0.1",
     "listen_port": 1080,
     "test_target": "example.com:80",
+    "discover": True,   # auto-connect to nodes learned from connected nodes
 }
 
 
@@ -137,6 +138,11 @@ class App:
         ttk.Label(f_socks, text="Тестовый адрес:").grid(row=0, column=4, sticky="w", **pad)
         self.e_test = ttk.Entry(f_socks, width=20)
         self.e_test.grid(row=0, column=5, sticky="w", **pad)
+        self.var_discover = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f_socks, text="Автообнаружение узлов (подключаться к узлам, "
+                                      "о которых рассказали известные)",
+                        variable=self.var_discover).grid(
+            row=1, column=0, columnspan=6, sticky="w", **pad)
 
         f_act = ttk.Frame(self.root)
         f_act.pack(fill="x", **pad)
@@ -183,6 +189,7 @@ class App:
         self.e_port.insert(0, str(prof.get("listen_port", 1080)))
         self.e_test.delete(0, "end")
         self.e_test.insert(0, prof.get("test_target", "example.com:80"))
+        self.var_discover.set(bool(prof.get("discover", True)))
 
     def _read_ui_into_profile(self) -> dict:
         try:
@@ -194,6 +201,7 @@ class App:
             "listen_host": self.e_host.get().strip() or "127.0.0.1",
             "listen_port": port,
             "test_target": self.e_test.get().strip() or "example.com:80",
+            "discover": bool(self.var_discover.get()),
         }
 
     def _on_profile_selected(self, _event=None) -> None:
@@ -319,7 +327,8 @@ class App:
         threading.Thread(target=self._connect_worker, args=(prof,), daemon=True).start()
 
     def _connect_worker(self, prof: dict) -> None:
-        client = VPNClient()
+        client = VPNClient(discovery_enabled=bool(prof.get("discover", True)),
+                           on_event=lambda text: self._post("log", text))
         client.start()
         ok = 0
         for text in prof["nodes"]:

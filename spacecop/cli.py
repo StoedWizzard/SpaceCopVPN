@@ -114,7 +114,8 @@ def _node_targets(args):
 def _connect_client(args):
     from .client import VPNClient
 
-    client = VPNClient()
+    client = VPNClient(discovery_enabled=not getattr(args, "no_discover", False),
+                       on_event=lambda text: print(f"[client] {text}", flush=True))
     client.start()
     for target in _node_targets(args):
         client.connect(target.x_public, target.address, expected_node_ed=target.ed_public)
@@ -241,6 +242,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--node", help="node host:port (alternative to --uri)")
         p.add_argument("--node-key", help="node x25519 public key (hex)")
         p.add_argument("--node-id", default="", help="expected node ed25519 id (hex)")
+        p.add_argument("--no-discover", action="store_true",
+                       help="do not auto-connect to nodes learned from connected nodes")
 
     p_proxy = sub.add_parser("proxy", help="run a local SOCKS5 proxy over the overlay")
     add_client_args(p_proxy)

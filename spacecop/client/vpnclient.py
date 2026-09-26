@@ -42,6 +42,13 @@ class RelayTimeout(Exception):
     pass
 
 
+# Automatic discovery: how often to pull peer lists from connected nodes, and
+# how long to leave a node alone after a failed connection attempt.
+DISCOVERY_INTERVAL = 60.0
+DISCOVERY_RETRY_COOLDOWN = 300.0
+DEFAULT_MAX_AUTO_NODES = 8
+
+
 @dataclass
 class _PendingHandshake:
     handshake: ClientHandshake
@@ -131,7 +138,23 @@ class ClientStream:
 
 
 class VPNClient:
-    def __init__(self, bind_host: str = "0.0.0.0", bind_port: int = 0):
+    def __init__(self, bind_host: str = "0.0.0.0", bind_port: int = 0,
+                 discovery_enabled: bool = True,
+                 max_auto_nodes: int = DEFAULT_MAX_AUTO_NODES,
+                 on_event=None):
+        """
+        ``discovery_enabled`` — after connecting to any node, ask it for the
+        peers it knows and connect to them too (the client side of the
+        gossip), so one connection URI is enough to reach the whole overlay.
+        ``max_auto_nodes`` caps the total number of connections.
+        ``on_event`` — optional callback receiving human-readable log lines.
+        """
+        self.discovery_enabled = discovery_enabled
+        self.max_auto_nodes = max_auto_nodes
+        self.on_event = on_event
+        self._discovering: set = set()
+        self._discovery_failed: Dict[bytes, float] = {}
+        self._discovery_thread: Optional[threading.Thread] = None
         self.ed_private, self.ed_public = ed25519.generate_keypair()
         self.transport = UDPTransport(bind_host, bind_port)
         self.transport.set_handler(self._on_datagram)
@@ -156,6 +179,9 @@ class VPNClient:
         self._ticker_thread = threading.Thread(target=self._stream_ticker, daemon=True,
                                                name="spacecop-client-tick")
         self._ticker_thread.start()
+        self._discovery_thread = threading.Thread(target=self._discovery_loop, daemon=True,
+                                                  name="spacecop-discovery")
+        self._discovery_thread.start()
 
     def stop(self) -> None:
         self._running.clear()
@@ -205,6 +231,14 @@ class VPNClient:
             self._connections[session.session_id] = conn
             self._reassemblers[session.session_id] = Reassembler()
             self._selector.add(conn)
+        if self.discovery_enabled:
+            # Pull this node's peer list right away so the rest of the overlay
+            # is reached within seconds of the first connection.
+            from ..protocol.messages import PeerRequest
+            try:
+                self.transport.send(PeerRequest(max_peers=32).encode(), addr)
+            except OSError:
+                pass
         return conn
 
     # -- relaying -----------------------------------------------------------
@@ -554,11 +588,72 @@ class VPNClient:
                 self._close_client_stream(stream, notify_peer=False)
                 stream.endpoint.on_close(msg.reason)
 
+    # -- automatic node discovery (client side of the gossip) ---------------
     def _handle_peer_list(self, body: bytes) -> None:
         try:
-            PeerList.decode(body)
+            peer_list = PeerList.decode(body)
         except framing.ProtocolError:
             return
+        if not self.discovery_enabled:
+            return
+        with self._lock:
+            known = {c.node_ed_public for c in self._connections.values()}
+            fresh = []
+            for entry in peer_list.peers:
+                if (entry.ed_public in known or entry.ed_public in self._discovering
+                        or entry.x_public == b"\x00" * 32):
+                    continue
+                cooldown_until = self._discovery_failed.get(entry.ed_public, 0.0)
+                if time.monotonic() < cooldown_until:
+                    continue
+                if len(known) + len(self._discovering) >= self.max_auto_nodes:
+                    break
+                self._discovering.add(entry.ed_public)
+                fresh.append(entry)
+        for entry in fresh:
+            threading.Thread(target=self._discover_connect, args=(entry,), daemon=True).start()
+
+    def _discover_connect(self, entry) -> None:
+        addr = (entry.host, entry.port)
+        try:
+            self._emit(f"discovered node {entry.ed_public.hex()[:16]} at {entry.host}:{entry.port}, connecting")
+            self.connect(entry.x_public, addr, expected_node_ed=entry.ed_public, timeout=6.0)
+            self._emit(f"connected to discovered node {entry.ed_public.hex()[:16]}")
+        except Exception as exc:
+            with self._lock:
+                self._discovery_failed[entry.ed_public] = time.monotonic() + DISCOVERY_RETRY_COOLDOWN
+            self._emit(f"could not connect to discovered node {entry.host}:{entry.port}: {exc}")
+        finally:
+            with self._lock:
+                self._discovering.discard(entry.ed_public)
+
+    def request_peers(self) -> None:
+        """Ask every connected node for the peers it knows (gossip pull)."""
+        from ..protocol.messages import PeerRequest
+
+        frame = PeerRequest(max_peers=32).encode()
+        for conn in self.connections():
+            try:
+                self.transport.send(frame, conn.addr)
+            except OSError:
+                pass
+
+    def _discovery_loop(self) -> None:
+        # First pull soon after start-up, then periodically to pick up new nodes.
+        next_at = time.monotonic() + 1.0
+        while self._running.is_set():
+            time.sleep(0.5)
+            if not self.discovery_enabled or time.monotonic() < next_at:
+                continue
+            next_at = time.monotonic() + DISCOVERY_INTERVAL
+            self.request_peers()
+
+    def _emit(self, text: str) -> None:
+        if self.on_event is not None:
+            try:
+                self.on_event(text)
+            except Exception:
+                pass
 
     # -- introspection ------------------------------------------------------
     def connections(self) -> List[NodeConnection]:

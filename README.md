@@ -29,8 +29,10 @@ library.
   Windows/Wintun guidance, and a **driver-free SOCKS5 proxy** that works
   everywhere with no root.
 * **Decentralised** — nodes discover each other by gossiping signed
-  announcements from a small bootstrap set; there is no central server. A
-  client connects to many nodes at once.
+  announcements from a small bootstrap set; there is no central server. The
+  client joins the gossip too: give it **one** connection URI and it pulls the
+  node's peer list, connects to every node it learns about (identity-pinned
+  from the gossiped keys), and keeps re-polling for newcomers.
 * **Nodes compete and earn points** — like miners spending a scarce resource
   (here, real bandwidth and uptime), nodes race to relay traffic. Each relay
   is rewarded with a client-signed, verifiable proof-of-relay receipt; a ledger
