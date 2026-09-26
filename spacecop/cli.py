@@ -284,7 +284,9 @@ def cmd_gui(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from . import __version__
     parser = argparse.ArgumentParser(prog="spacecop", description=__doc__.splitlines()[0])
+    parser.add_argument("--version", action="version", version=f"spacecop {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_key = sub.add_parser("keygen", help="create/load a node identity and print its keys")

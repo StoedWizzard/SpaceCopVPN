@@ -38,7 +38,8 @@ else
 fi
 
 echo
-echo "Готово. Запуск графического клиента:  spacecop-gui"
+echo "Установлено: $(spacecop --version 2>/dev/null || echo 'spacecop не в PATH — откройте новый терминал')"
+echo "Готово. Запуск графического клиента:  spacecop-gui   (в левом нижнем углу окна — версия)"
 echo "Или из меню приложений: «SpaceCopVPN»."
 echo "Вставьте в окно строку подключения вида spacecop://host:port/<ключ>/<id>,"
 echo "которую печатает узел (или скрипт deploy/install_server.sh)."

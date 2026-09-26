@@ -26,9 +26,39 @@
 # =============================================================================
 set -euo pipefail
 
-PORT="${SPACECOP_PORT:-51820}"
+# ---------------------------------------------------------------- arguments
+# Flags work under plain `sudo` (which strips environment variables):
+#   sudo ./deploy/install_server.sh --bootstrap 1.2.3.4:51820 --port 51820 \
+#        --advertise 5.6.7.8 --no-exit
+# Environment variables (SPACECOP_*) are still honoured when present, e.g.
+#   sudo SPACECOP_BOOTSTRAP=1.2.3.4:51820 ./deploy/install_server.sh
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bootstrap) SPACECOP_BOOTSTRAP="${2:-}"; shift 2 ;;
+    --port)      SPACECOP_PORT="${2:-}"; shift 2 ;;
+    --advertise) SPACECOP_ADVERTISE="${2:-}"; shift 2 ;;
+    --no-exit)   SPACECOP_NO_EXIT=1; shift ;;
+    --repo)      SPACECOP_REPO="${2:-}"; shift 2 ;;
+    -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
+  esac
+done
+
 INSTALL_DIR=/opt/spacecop
 CONF_DIR=/etc/spacecop
+# A re-run keeps the previous settings unless new ones are given.
+if [[ -f "$CONF_DIR/node.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$CONF_DIR/node.env"
+  _prev_extra="${SPACECOP_EXTRA_ARGS:-}"
+  if [[ -z "${SPACECOP_BOOTSTRAP:-}" && "$_prev_extra" == *"--bootstrap"* ]]; then
+    SPACECOP_BOOTSTRAP="$(echo "$_prev_extra" | sed -n 's/.*--bootstrap \(.*\)$/\1/p' | sed 's/ --no-exit//')"
+  fi
+  if [[ -z "${SPACECOP_NO_EXIT:-}" && "$_prev_extra" == *"--no-exit"* ]]; then
+    SPACECOP_NO_EXIT=1
+  fi
+fi
+PORT="${SPACECOP_PORT:-51820}"
 IDENTITY="$CONF_DIR/identity.json"
 SERVICE=spacecop-node
 REPO_URL="${SPACECOP_REPO:-https://github.com/StoedWizzard/SpaceCopVPN.git}"
@@ -222,6 +252,7 @@ echo "  Connection URI (paste into the client / GUI):"
 echo
 echo "    $URI"
 echo
+echo "  Bootstrap: ${SPACECOP_BOOTSTRAP:-(none — this node announces to nobody; add --bootstrap host:port)}"
 echo "  Service:   systemctl status $SERVICE     journalctl -u $SERVICE -f"
 echo "  Identity:  $IDENTITY  (back it up: it IS the node's identity)"
 echo "  Settings:  $CONF_DIR/node.env"
