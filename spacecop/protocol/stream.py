@@ -41,8 +41,6 @@ _sysrandom = random.SystemRandom()
 
 RTO_INITIAL = 0.4
 RTO_MAX = 3.0
-ACK_EVERY = 4              # in-order chunks per ACK (gaps, dups and FIN ack at once)
-ACK_DELAY_MAX = 0.05       # a pending ACK never waits longer than this (via tick)
 DEAD_AFTER = 30.0          # no ack progress for this long -> stream is dead
 RECV_BUFFER_CHUNKS = c.STREAM_WINDOW * 2
 
@@ -78,8 +76,6 @@ class StreamEndpoint:
         self._ooo: Dict[int, StreamData] = {}  # out-of-order chunks
         self._fin_received = False
         self._eof_delivered = False
-        self._unacked_rx = 0                   # in-order chunks received since last ACK
-        self._ack_pending_since: Optional[float] = None
 
         self._closed = False
         self._last_progress = time.monotonic()
@@ -132,7 +128,6 @@ class StreamEndpoint:
     # --------------------------------------------------------------- receive
     def on_data(self, msg: StreamData) -> None:
         deliver: List[StreamData] = []
-        ack = None
         with self._lock:
             if self._closed:
                 return
@@ -142,22 +137,12 @@ class StreamEndpoint:
                 while self._expected in self._ooo:
                     deliver.append(self._ooo.pop(self._expected))
                     self._expected += 1
-                self._unacked_rx += 1
-                # Delayed ACK: one ACK per ACK_EVERY in-order chunks halves the
-                # packet count; gaps, duplicates and FIN are acked immediately
-                # and tick() flushes a pending ACK within ACK_DELAY_MAX.
-                if self._unacked_rx >= ACK_EVERY or msg.fin or self._ooo:
-                    ack = self._make_ack()
-                elif self._ack_pending_since is None:
-                    self._ack_pending_since = time.monotonic()
             elif msg.seq > self._expected:
                 if len(self._ooo) < RECV_BUFFER_CHUNKS and msg.seq not in self._ooo:
                     self._ooo[msg.seq] = msg
-                ack = self._make_ack()
-            else:
-                ack = self._make_ack()  # duplicate of delivered data -> re-ack now
-        if ack is not None:
-            self._transmit(ack)
+            # else: duplicate of something already delivered -> just re-ack
+            ack = StreamAck(self.stream_id, self._expected, sorted(self._ooo)[:64]).encode()
+        self._transmit(ack)
         for m in deliver:
             if m.data:
                 self.bytes_received += len(m.data)
@@ -175,13 +160,6 @@ class StreamEndpoint:
                         self._on_eof()
                     except Exception:
                         pass
-
-    def _make_ack(self) -> bytes:
-        """Build the cumulative + selective ACK; caller holds the lock."""
-        self._unacked_rx = 0
-        self._ack_pending_since = None
-        sacks = sorted(self._ooo)[:64] if self._ooo else []
-        return StreamAck(self.stream_id, self._expected, sacks).encode()
 
     def on_ack(self, msg: StreamAck) -> None:
         with self._cv:
@@ -206,12 +184,9 @@ class StreamEndpoint:
         """Retransmit overdue chunks; call every ~100 ms."""
         now = now or time.monotonic()
         to_send: List[bytes] = []
-        ack = None
         with self._lock:
             if self._closed:
                 return
-            if self._ack_pending_since is not None and now - self._ack_pending_since >= ACK_DELAY_MAX:
-                ack = self._make_ack()
             if self._unacked and now - self._last_progress > DEAD_AFTER:
                 dead = True
             else:
@@ -227,8 +202,6 @@ class StreamEndpoint:
         if dead:
             self._finish("peer stopped acknowledging", error=True)
             return
-        if ack is not None:
-            self._transmit(ack)
         _sysrandom.shuffle(to_send)  # retransmits too go out in random order
         for frame in to_send:
             self._transmit(frame)
