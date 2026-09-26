@@ -39,6 +39,22 @@ MSG_SCORE_REPORT = 0x23     # a node reports its accumulated score
 MSG_RELAY_RESPONSE = 0x24   # a node returns the relayed destination's reply
 MSG_ERROR = 0x7F            # node -> client: why a request was rejected (in the clear)
 
+# Streaming relay (full TCP connections through the overlay, e.g. HTTPS).
+# These travel *inside* the encrypted session as application messages.
+MSG_STREAM_OPEN = 0x30      # client -> node: connect to dest_host:dest_port
+MSG_STREAM_OPENED = 0x31    # node -> client: connect result
+MSG_STREAM_DATA = 0x32      # both: an ordered chunk of the byte stream
+MSG_STREAM_ACK = 0x33       # both: cumulative + selective acknowledgement
+MSG_STREAM_CLOSE = 0x34     # both: tear the stream down
+
+# Stream chunks are sized so that one chunk = one MTU-safe UDP datagram
+# (~1.3 KB on the wire).  A 20 KB datagram is IP-fragmented into ~14 pieces
+# and many networks drop IP fragments, so for interactive streams small
+# chunks are far more robust.  The 20 KB logical fragmentation still applies
+# to any application message larger than this.
+STREAM_CHUNK_SIZE = 1200
+STREAM_WINDOW = 128         # chunks in flight per direction (~150 KB)
+
 MESSAGE_NAMES = {
     MSG_HANDSHAKE_INIT: "HANDSHAKE_INIT",
     MSG_HANDSHAKE_RESP: "HANDSHAKE_RESP",
@@ -54,6 +70,12 @@ MESSAGE_NAMES = {
     MSG_SCORE_QUERY: "SCORE_QUERY",
     MSG_SCORE_REPORT: "SCORE_REPORT",
     MSG_RELAY_RESPONSE: "RELAY_RESPONSE",
+    MSG_ERROR: "ERROR",
+    MSG_STREAM_OPEN: "STREAM_OPEN",
+    MSG_STREAM_OPENED: "STREAM_OPENED",
+    MSG_STREAM_DATA: "STREAM_DATA",
+    MSG_STREAM_ACK: "STREAM_ACK",
+    MSG_STREAM_CLOSE: "STREAM_CLOSE",
 }
 
 # ---------------------------------------------------------------------------

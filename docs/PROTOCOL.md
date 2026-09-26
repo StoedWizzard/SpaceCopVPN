@@ -141,7 +141,35 @@ score(u64) || timestamp(u64) || signature(bytes16)`, where the signature is
 Ed25519 over everything before it. **PEER_LIST body**: `count(u16)` then
 `count` × `{ed_pub(32) || x_pub(32) || host(bytes16) || port(u16)}`.
 
-## 9. Receipts
+## 9. Streaming relay (full TCP connections)
+
+Browsers need real connections — HTTPS is several round trips inside *one*
+TCP connection — so besides request/response there are **streams**. All
+stream messages travel inside the encrypted session as application messages.
+
+| Message | Body |
+|---------|------|
+| `STREAM_OPEN` (0x30) | `stream_id(8) || dest_host(bytes16) || dest_port(u16)` |
+| `STREAM_OPENED` (0x31) | `stream_id(8) || status(u8) || text(bytes16)`, `status = 0` = connected |
+| `STREAM_DATA` (0x32) | `stream_id(8) || seq(u32) || fin(u8) || data(bytes16)` |
+| `STREAM_ACK` (0x33) | `stream_id(8) || ack(u32) || n(u16) || sack(u32)×n` |
+| `STREAM_CLOSE` (0x34) | `stream_id(8) || reason(u8)` |
+
+Per direction this is a small TCP over datagrams: chunks of at most
+`STREAM_CHUNK_SIZE` (1200 B, one MTU-safe datagram each — a 20 KB datagram is
+IP-fragmented into ~14 pieces that many networks drop), a window of
+`STREAM_WINDOW` (128) chunks in flight with back-pressure, in-order delivery
+with buffering of out-of-order chunks, an ack per chunk carrying the next
+expected seq plus selective acks, retransmission after 0.4 s → 3 s
+(exponential), stream death after 30 s without progress, `fin` for half-close,
+`STREAM_OPEN` re-sent every second until `STREAM_OPENED` (duplicates for an
+open stream are ignored). Chunks within the window (and retransmits) go out in
+random order. Messages larger than 20 KB still use the §6 fragmentation.
+
+The SOCKS5 proxy maps each `CONNECT` to one stream; all connections to a site
+are pinned to one node (stable IP).
+
+## 10. Receipts
 
 **RECEIPT body**: `client_ed_pub(32) || node_ed_pub(32) || seq(u64) ||
 byte_count(u64) || timestamp(u64) || signature(bytes16)`, Ed25519-signed by the

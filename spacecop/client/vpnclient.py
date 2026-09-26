@@ -26,9 +26,16 @@ from ..protocol.messages import (
     Receipt,
     RelayRequest,
     RelayResponse,
+    StreamAck,
+    StreamClose,
+    StreamData,
+    StreamOpen,
+    StreamOpened,
 )
+from ..protocol.stream import StreamEndpoint, StreamError
 from ..transport import Address, UDPTransport
 from .multipath import NodeConnection, NodeSelector
+import queue as _queue
 
 
 class RelayTimeout(Exception):
@@ -56,6 +63,72 @@ class _PendingRequest:
     response: Optional[RelayResponse] = None
 
 
+@dataclass
+class _PendingOpen:
+    event: threading.Event = field(default_factory=threading.Event)
+    status: int = -1
+    text: bytes = b""
+
+
+class ClientStream:
+    """A TCP connection to ``dest`` carried through a node, with a socket-like API.
+
+    ``send(data)`` blocks while the send window is full; ``recv()`` blocks until
+    bytes arrive and returns ``b""`` at EOF; ``close()`` tears the stream down
+    and, if any bytes were carried, hands the node a signed receipt.
+    """
+
+    def __init__(self, client: "VPNClient", conn: NodeConnection, stream_id: bytes,
+                 dest_host: str, dest_port: int):
+        self._client = client
+        self.conn = conn
+        self.stream_id = stream_id
+        self.dest = (dest_host, dest_port)
+        self._inbox: "_queue.Queue" = _queue.Queue()
+        self._closed = False
+        self.error: str = ""
+        self.endpoint = StreamEndpoint(
+            stream_id,
+            send_msg=lambda frame: client._send_app_message(conn, frame),
+            on_deliver=self._inbox.put,
+            on_eof=lambda: self._inbox.put(None),
+            on_error=self._on_error,
+        )
+
+    def _on_error(self, why: str) -> None:
+        self.error = why
+        self._inbox.put(None)
+
+    def send(self, data: bytes) -> None:
+        self.endpoint.send(data)
+
+    def send_eof(self) -> None:
+        self.endpoint.send_fin()
+
+    def recv(self, timeout: Optional[float] = None) -> bytes:
+        """Next chunk of received bytes, or b"" at EOF / after close."""
+        if self._closed and self._inbox.empty():
+            return b""
+        try:
+            item = self._inbox.get(timeout=timeout)
+        except _queue.Empty:
+            raise TimeoutError("no data")
+        if item is None:
+            self._inbox.put(None)  # keep EOF sticky for subsequent recv() calls
+            return b""
+        return item
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._client._close_client_stream(self, notify_peer=True)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed or self.endpoint.closed
+
+
 class VPNClient:
     def __init__(self, bind_host: str = "0.0.0.0", bind_port: int = 0):
         self.ed_private, self.ed_public = ed25519.generate_keypair()
@@ -68,14 +141,29 @@ class VPNClient:
         self._pending_handshakes: Dict[bytes, _PendingHandshake] = {}
         self._pending_requests: Dict[bytes, _PendingRequest] = {}
         self._pending_pings: Dict[bytes, _PendingPing] = {}
+        self._streams: Dict[bytes, ClientStream] = {}
+        self._pending_opens: Dict[bytes, _PendingOpen] = {}
         self._selector = NodeSelector()
         self._lock = threading.Lock()
         self._receipt_seq = 0
+        self._running = threading.Event()
+        self._ticker_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         self.transport.start()
+        self._running.set()
+        self._ticker_thread = threading.Thread(target=self._stream_ticker, daemon=True,
+                                               name="spacecop-client-tick")
+        self._ticker_thread.start()
 
     def stop(self) -> None:
+        self._running.clear()
+        with self._lock:
+            streams = list(self._streams.values())
+        for s in streams:
+            s.close()
+        if self._ticker_thread is not None:
+            self._ticker_thread.join(timeout=1.0)
         self.transport.stop()
 
     # -- connection establishment ------------------------------------------
@@ -225,6 +313,70 @@ class VPNClient:
             except OSError:
                 break
 
+    # -- streaming (full TCP connections through a node) --------------------
+    def open_stream(self, dest_host: str, dest_port: int,
+                    via: Optional[NodeConnection] = None, timeout: float = 15.0) -> ClientStream:
+        """Open a TCP connection to ``dest`` through a node and return a stream.
+
+        The node is chosen with the same per-site pinning as :meth:`relay`,
+        so every connection to a site leaves through the same exit IP.
+        """
+        conn = via or self._selector.choose(dest_host)
+        if conn is None:
+            raise RelayTimeout("no node connections available")
+        stream_id = os.urandom(8)
+        stream = ClientStream(self, conn, stream_id, dest_host, dest_port)
+        pending = _PendingOpen()
+        with self._lock:
+            self._streams[stream_id] = stream
+            self._pending_opens[stream_id] = pending
+
+        open_frame = StreamOpen(stream_id, dest_host, dest_port).encode()
+        deadline = time.monotonic() + timeout
+        answered = False
+        while time.monotonic() < deadline:
+            self._send_app_message(conn, open_frame)  # re-sent until acknowledged
+            if pending.event.wait(min(1.0, max(0.05, deadline - time.monotonic()))):
+                answered = True
+                break
+        with self._lock:
+            self._pending_opens.pop(stream_id, None)
+        if not answered or pending.status != 0:
+            with self._lock:
+                self._streams.pop(stream_id, None)
+            self._selector.record_failure(conn, dest_host)
+            why = "no answer from node" if not answered else pending.text.decode("utf-8", "replace")
+            raise RelayTimeout(f"stream open to {dest_host}:{dest_port} failed: {why}")
+        self._selector.record_success(conn, 0.0, 0)
+        return stream
+
+    def _close_client_stream(self, stream: ClientStream, notify_peer: bool) -> None:
+        with self._lock:
+            self._streams.pop(stream.stream_id, None)
+        if notify_peer:
+            stream.endpoint.close()
+        else:
+            stream.endpoint.on_close()
+        carried = stream.endpoint.bytes_sent + stream.endpoint.bytes_received
+        if carried > 0 and stream.conn.node_ed_public:
+            self._selector.record_success(stream.conn, 0.0, carried)
+            self._send_receipt(stream.conn, carried)
+
+    def _stream_ticker(self) -> None:
+        while self._running.is_set():
+            time.sleep(0.1)
+            now = time.monotonic()
+            with self._lock:
+                streams = list(self._streams.values())
+            for s in streams:
+                try:
+                    s.endpoint.tick(now)
+                    if s.endpoint.closed and not s._closed:
+                        s._closed = True
+                        self._close_client_stream(s, notify_peer=False)
+                except Exception:
+                    pass
+
     # -- receive path -------------------------------------------------------
     def _on_datagram(self, data: bytes, addr: Address) -> None:
         try:
@@ -330,6 +482,38 @@ class VPNClient:
             if pending is not None:
                 pending.response = resp
                 pending.event.set()
+        elif msg_type == c.MSG_STREAM_OPENED:
+            try:
+                msg = StreamOpened.decode(inner)
+            except framing.ProtocolError:
+                return
+            with self._lock:
+                pending = self._pending_opens.get(msg.stream_id)
+            if pending is not None:
+                pending.status, pending.text = msg.status, msg.text
+                pending.event.set()
+        elif msg_type in (c.MSG_STREAM_DATA, c.MSG_STREAM_ACK, c.MSG_STREAM_CLOSE):
+            try:
+                if msg_type == c.MSG_STREAM_DATA:
+                    msg = StreamData.decode(inner)
+                elif msg_type == c.MSG_STREAM_ACK:
+                    msg = StreamAck.decode(inner)
+                else:
+                    msg = StreamClose.decode(inner)
+            except framing.ProtocolError:
+                return
+            with self._lock:
+                stream = self._streams.get(msg.stream_id)
+            if stream is None:
+                return
+            if msg_type == c.MSG_STREAM_DATA:
+                stream.endpoint.on_data(msg)
+            elif msg_type == c.MSG_STREAM_ACK:
+                stream.endpoint.on_ack(msg)
+            else:
+                stream._closed = True
+                self._close_client_stream(stream, notify_peer=False)
+                stream.endpoint.on_close(msg.reason)
 
     def _handle_peer_list(self, body: bytes) -> None:
         try:

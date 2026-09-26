@@ -39,8 +39,15 @@ from ..protocol.messages import (
     RelayRequest,
     RelayResponse,
     ScoreReport,
+    StreamAck,
+    StreamClose,
+    StreamData,
+    StreamOpen,
+    StreamOpened,
 )
+from ..protocol.stream import StreamEndpoint
 from ..transport import Address, UDPTransport
+import queue as _queue
 from .directory import PeerDirectory
 from .scoring import Ledger
 
@@ -65,6 +72,22 @@ class _SessionState:
     addr: Address
     reassembler: Reassembler = field(default_factory=Reassembler)
     last_active: float = field(default_factory=time.monotonic)
+    streams: Dict[bytes, "_NodeStream"] = field(default_factory=dict)
+
+
+@dataclass
+class _NodeStream:
+    """One relayed TCP connection: endpoint + socket + writer queue."""
+
+    endpoint: StreamEndpoint
+    sock: Optional[socket.socket] = None
+    outbox: "_queue.Queue" = field(default_factory=_queue.Queue)
+    opened: float = field(default_factory=time.monotonic)
+    done: bool = False
+
+
+STREAM_CONNECT_TIMEOUT = 10.0
+STREAM_IDLE_TIMEOUT = 10 * 60.0
 
 
 class RelayNode:
@@ -117,11 +140,19 @@ class RelayNode:
         self._gossip_thread = threading.Thread(target=self._gossip_loop, daemon=True,
                                                name="spacecop-gossip")
         self._gossip_thread.start()
+        self._ticker_thread = threading.Thread(target=self._stream_ticker, daemon=True,
+                                               name="spacecop-stream-tick")
+        self._ticker_thread.start()
 
     def stop(self) -> None:
         self._running.clear()
         if self._gossip_thread is not None:
             self._gossip_thread.join(timeout=2.0)
+        with self._lock:
+            states = list(self._sessions.values())
+        for st in states:
+            for ns in list(st.streams.values()):
+                self._close_node_stream(st, ns, notify_peer=False)
         self._executor.shutdown(wait=False)
         self.transport.stop()
 
@@ -225,6 +256,157 @@ class RelayNode:
             return
         if msg_type == c.MSG_RELAY_REQUEST:
             self._handle_relay_request(state, inner)
+        elif msg_type == c.MSG_STREAM_OPEN:
+            self._handle_stream_open(state, inner)
+        elif msg_type == c.MSG_STREAM_DATA:
+            self._route_stream(state, inner, StreamData, lambda ns, m: ns.endpoint.on_data(m))
+        elif msg_type == c.MSG_STREAM_ACK:
+            self._route_stream(state, inner, StreamAck, lambda ns, m: ns.endpoint.on_ack(m))
+        elif msg_type == c.MSG_STREAM_CLOSE:
+            self._route_stream(state, inner, StreamClose,
+                               lambda ns, m: self._close_node_stream(state, ns, notify_peer=False,
+                                                                     peer_reason=m.reason))
+
+    # -- streaming relay (full TCP connections, e.g. HTTPS) ------------------
+    def _route_stream(self, state: _SessionState, inner: bytes, cls, action) -> None:
+        try:
+            msg = cls.decode(inner)
+        except framing.ProtocolError:
+            return
+        with self._lock:
+            ns = state.streams.get(msg.stream_id)
+        if ns is not None:
+            action(ns, msg)
+
+    def _handle_stream_open(self, state: _SessionState, inner: bytes) -> None:
+        try:
+            req = StreamOpen.decode(inner)
+        except framing.ProtocolError:
+            return
+        with self._lock:
+            if req.stream_id in state.streams:
+                return  # retransmitted OPEN for a stream we already have
+            if not self.exit_enabled:
+                self._send_app_message(state, StreamOpened(req.stream_id, 1, b"exit disabled").encode())
+                return
+            ns = _NodeStream(endpoint=self._make_endpoint(state, req.stream_id))
+            state.streams[req.stream_id] = ns
+        self._executor.submit(self._stream_connect, state, ns, req)
+
+    def _make_endpoint(self, state: _SessionState, stream_id: bytes) -> StreamEndpoint:
+        holder: Dict[str, _NodeStream] = {}
+
+        def deliver(data: bytes) -> None:
+            ns = holder.get("ns") or state.streams.get(stream_id)
+            if ns is not None:
+                ns.outbox.put(data)
+
+        def eof() -> None:
+            ns = state.streams.get(stream_id)
+            if ns is not None:
+                ns.outbox.put(None)  # writer thread half-closes the socket
+
+        def error(_why: str) -> None:
+            ns = state.streams.get(stream_id)
+            if ns is not None:
+                self._close_node_stream(state, ns, notify_peer=False)
+
+        return StreamEndpoint(stream_id, lambda frame: self._send_app_message(state, frame),
+                              deliver, eof, error)
+
+    def _stream_connect(self, state: _SessionState, ns: _NodeStream, req: StreamOpen) -> None:
+        try:
+            sock = socket.create_connection((req.dest_host, req.dest_port),
+                                            timeout=STREAM_CONNECT_TIMEOUT)
+        except OSError as exc:
+            self._send_app_message(state, StreamOpened(req.stream_id, 2,
+                                                       str(exc).encode()[:120]).encode())
+            with self._lock:
+                state.streams.pop(req.stream_id, None)
+            return
+        sock.settimeout(None)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        ns.sock = sock
+        with self._lock:
+            self.relayed_requests += 1
+        self._send_app_message(state, StreamOpened(req.stream_id, 0).encode())
+        threading.Thread(target=self._stream_reader, args=(state, ns), daemon=True).start()
+        threading.Thread(target=self._stream_writer, args=(state, ns), daemon=True).start()
+
+    def _stream_reader(self, state: _SessionState, ns: _NodeStream) -> None:
+        """destination -> overlay"""
+        try:
+            while not ns.endpoint.closed:
+                chunk = ns.sock.recv(c.STREAM_CHUNK_SIZE * 8)
+                if not chunk:
+                    ns.endpoint.send_fin()
+                    break
+                with self._lock:
+                    self.relayed_bytes += len(chunk)
+                ns.endpoint.send(chunk)
+        except Exception:
+            pass
+        self._maybe_finish(state, ns)
+
+    def _stream_writer(self, state: _SessionState, ns: _NodeStream) -> None:
+        """overlay -> destination"""
+        try:
+            while True:
+                item = ns.outbox.get()
+                if item is None:
+                    try:
+                        ns.sock.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    break
+                with self._lock:
+                    self.relayed_bytes += len(item)
+                ns.sock.sendall(item)
+        except Exception:
+            self._close_node_stream(state, ns, notify_peer=True)
+        self._maybe_finish(state, ns)
+
+    def _maybe_finish(self, state: _SessionState, ns: _NodeStream) -> None:
+        if ns.endpoint.closed or ns.endpoint.both_directions_done:
+            self._close_node_stream(state, ns, notify_peer=not ns.endpoint.closed)
+
+    def _close_node_stream(self, state: _SessionState, ns: _NodeStream,
+                           notify_peer: bool, peer_reason: int = 0) -> None:
+        with self._lock:
+            if ns.done:
+                return
+            ns.done = True
+            state.streams.pop(ns.endpoint.stream_id, None)
+        if notify_peer:
+            ns.endpoint.close()
+        else:
+            ns.endpoint.on_close(peer_reason)
+        ns.outbox.put(None)
+        if ns.sock is not None:
+            try:
+                ns.sock.close()
+            except OSError:
+                pass
+
+    def _stream_ticker(self) -> None:
+        while self._running.is_set():
+            time.sleep(0.1)
+            now = time.monotonic()
+            with self._lock:
+                items = [(st, ns) for st in self._sessions.values()
+                         for ns in list(st.streams.values())]
+            for st, ns in items:
+                try:
+                    ns.endpoint.tick(now)
+                    if ns.endpoint.closed:
+                        self._close_node_stream(st, ns, notify_peer=False)
+                    elif ns.endpoint.both_directions_done:
+                        self._close_node_stream(st, ns, notify_peer=True)
+                except Exception:
+                    pass
 
     # -- relaying (the work that earns points) ------------------------------
     def _handle_relay_request(self, state: _SessionState, inner: bytes) -> None:

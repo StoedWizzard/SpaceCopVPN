@@ -39,6 +39,11 @@ library.
 * **20 KB shuffled, encrypted fragments** — every payload (in both directions)
   is split into 20 KB fragments, emitted in random order, each independently
   encrypted, and reassembled on the receiving device.
+* **Real TCP streams: HTTPS just works** — the SOCKS5 proxy carries every
+  connection as a stream (a small TCP-like engine over the encrypted
+  datagrams: MTU-safe chunks, window, selective acks, retransmission), so TLS
+  handshakes, keep-alive, WebSockets and SSH all pass through. Verified with a
+  live HTTPS request via `curl --socks5-hostname`.
 * **One site, one IP** — all requests to the same site (including its
   subdomains) are pinned to the same exit node for the session, so a web site
   sees a stable IP and does not drop logins.
@@ -104,11 +109,13 @@ python -m spacecop.cli gui
 python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-77 tests cover the crypto (against RFC 8439/7748/5869 vectors and OpenSSL), the
+89 tests cover the crypto (against RFC 8439/7748/5869 vectors and OpenSSL), the
 handshake and session layer, replay protection, fragmentation and reassembly,
 the scoring ledger and proof-of-work, connection URIs and identity persistence,
-full end-to-end relaying over real UDP/TCP sockets (including the SOCKS proxy),
-300 concurrent relays under load, and one-site-one-node IP consistency.
+full end-to-end relaying over real UDP/TCP sockets, streaming (multi-round-trip
+dialogues, 700 KB transfers, 120 concurrent streams, a 30%-loss channel, SOCKS5),
+300 concurrent relays under load, one-site-one-node IP consistency, and the
+ping/handshake diagnostics.
 
 ## Layout
 

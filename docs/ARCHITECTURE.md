@@ -60,6 +60,22 @@ them.
   only if that node fails, is removed, or has been idle for 30 minutes.
   Different sites still spread across nodes, so competition is preserved.
 
+## Streams: HTTPS and arbitrary TCP through the overlay
+
+Request/response cannot serve a browser: a TLS handshake is several round
+trips inside *one* connection. So the SOCKS5 proxy opens a **stream** per
+`CONNECT` (`spacecop/protocol/stream.py`): both ends run a small TCP-like
+engine — 1200 B chunks (one MTU-safe datagram each), a 128-chunk window with
+back-pressure, in-order delivery, an ack per chunk with selective acks,
+retransmission on an exponential timeout, FIN for half-close. The node keeps a
+TCP socket per stream with a reader thread (destination → overlay) and a
+queue-fed writer thread (overlay → destination), so the UDP loop never blocks.
+Chunks in the window go out in random order; messages above 20 KB still use
+the 20 KB fragmentation. Verified with a real HTTPS request via
+`curl --socks5-hostname` (TLS handshake, response and keep-alive inside one
+stream), 120 concurrent connections, and a channel with 30% loss. A receipt
+for a stream is issued on close for the bytes carried in both directions.
+
 ## Decentralisation
 
 There is no coordinator. A node/client starts from a small bootstrap address
@@ -112,18 +128,14 @@ the only OS-specific part, isolated behind `TunInterface`:
 
 ## Known limits / roadmap
 
-* **Streaming relay.** The relay is request/response, which covers HTTP/1.0,
-  DNS-over-TCP, and many APIs. A streaming mode (ordered per-connection byte
-  streams with flow control) would generalise it to arbitrary TCP; the session
-  and fragmentation layers already support the needed ordering primitives.
 * **Fragment-level multipath.** Today one request's fragments go through one
   node. Striping fragments of a single message across multiple nodes (with a
   shared reassembly rendezvous) is a documented extension of the fragmentation
   layer.
-* **MTU.** A 20 KB fragment exceeds the path MTU, so at the IP layer it may be
-  IP-fragmented; this is fine on LAN/loopback. A production build would size
-  fragments to the path MTU (or rely on the streaming mode) while keeping the
-  20 KB logical chunking above it.
+* **MTU.** Streams already use 1200 B chunks (one MTU-safe datagram). The
+  request/response mode (`relay()`, CLI `relay`) still sends each 20 KB
+  fragment as one datagram that is IP-fragmented; fine on LAN/loopback, but
+  over the Internet it should get the same MTU-sized segmentation.
 * **Sybil economics.** Proof-of-work gates registration and client-signed
   receipts prevent trivial forgery, but a fully trustless incentive system needs
   staking/payments; see SCORING.md.

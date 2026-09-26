@@ -289,6 +289,119 @@ class Receipt:
         return Receipt(client_ed, node_ed, seq, byte_count, timestamp, signature)
 
 
+# ---------------------------------------------------------------------------
+# Streaming relay
+# ---------------------------------------------------------------------------
+@dataclass
+class StreamOpen:
+    stream_id: bytes
+    dest_host: str
+    dest_port: int
+
+    def encode(self) -> bytes:
+        buf = bytearray()
+        buf.extend(self.stream_id)
+        framing.write_bytes(buf, self.dest_host.encode("utf-8"))
+        framing.write_u16(buf, self.dest_port)
+        return framing.encode_frame(c.MSG_STREAM_OPEN, bytes(buf))
+
+    @staticmethod
+    def decode(body: bytes) -> "StreamOpen":
+        stream_id = body[:8]
+        host, offset = framing.read_bytes(body, 8)
+        port, offset = framing.read_u16(body, offset)
+        return StreamOpen(stream_id, host.decode("utf-8"), port)
+
+
+@dataclass
+class StreamOpened:
+    stream_id: bytes
+    status: int          # 0 = connected, non-zero = failed
+    text: bytes = b""
+
+    def encode(self) -> bytes:
+        buf = bytearray()
+        buf.extend(self.stream_id)
+        framing.write_u8(buf, self.status)
+        framing.write_bytes(buf, self.text)
+        return framing.encode_frame(c.MSG_STREAM_OPENED, bytes(buf))
+
+    @staticmethod
+    def decode(body: bytes) -> "StreamOpened":
+        stream_id = body[:8]
+        status, offset = framing.read_u8(body, 8)
+        text, offset = framing.read_bytes(body, offset)
+        return StreamOpened(stream_id, status, text)
+
+
+@dataclass
+class StreamData:
+    stream_id: bytes
+    seq: int
+    fin: bool
+    data: bytes
+
+    def encode(self) -> bytes:
+        buf = bytearray()
+        buf.extend(self.stream_id)
+        framing.write_u32(buf, self.seq)
+        framing.write_u8(buf, 1 if self.fin else 0)
+        framing.write_bytes(buf, self.data)
+        return framing.encode_frame(c.MSG_STREAM_DATA, bytes(buf))
+
+    @staticmethod
+    def decode(body: bytes) -> "StreamData":
+        stream_id = body[:8]
+        seq, offset = framing.read_u32(body, 8)
+        fin, offset = framing.read_u8(body, offset)
+        data, offset = framing.read_bytes(body, offset)
+        return StreamData(stream_id, seq, bool(fin), data)
+
+
+@dataclass
+class StreamAck:
+    stream_id: bytes
+    ack: int                                   # next expected seq (cumulative)
+    sacks: List[int] = field(default_factory=list)  # received out-of-order seqs
+
+    def encode(self) -> bytes:
+        buf = bytearray()
+        buf.extend(self.stream_id)
+        framing.write_u32(buf, self.ack)
+        framing.write_u16(buf, len(self.sacks))
+        for s in self.sacks:
+            framing.write_u32(buf, s)
+        return framing.encode_frame(c.MSG_STREAM_ACK, bytes(buf))
+
+    @staticmethod
+    def decode(body: bytes) -> "StreamAck":
+        stream_id = body[:8]
+        ack, offset = framing.read_u32(body, 8)
+        n, offset = framing.read_u16(body, offset)
+        sacks = []
+        for _ in range(n):
+            s, offset = framing.read_u32(body, offset)
+            sacks.append(s)
+        return StreamAck(stream_id, ack, sacks)
+
+
+@dataclass
+class StreamClose:
+    stream_id: bytes
+    reason: int = 0      # 0 = normal, 1 = error/abort
+
+    def encode(self) -> bytes:
+        buf = bytearray()
+        buf.extend(self.stream_id)
+        framing.write_u8(buf, self.reason)
+        return framing.encode_frame(c.MSG_STREAM_CLOSE, bytes(buf))
+
+    @staticmethod
+    def decode(body: bytes) -> "StreamClose":
+        reason, _ = framing.read_u8(body, 8)
+        return StreamClose(body[:8], reason)
+
+
 @dataclass
 class ScoreReport:
     ed_public: bytes
