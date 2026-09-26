@@ -322,9 +322,30 @@ class VPNClient:
         The node is chosen with the same per-site pinning as :meth:`relay`,
         so every connection to a site leaves through the same exit IP.
         """
-        conn = via or self._selector.choose(dest_host)
-        if conn is None:
+        # Failover: if the chosen node cannot reach the destination (its network
+        # blocks that site, its exit is disabled, or it does not answer), try
+        # the other nodes before giving up.  A site that one node cannot serve
+        # thereby migrates to a node that can — and stays pinned there.
+        tried: set = set()
+        errors = []
+        attempts = 1 if via is not None else max(1, self._selector.node_count())
+        for _ in range(attempts):
+            conn = via or self._selector.choose(dest_host, exclude=tried)
+            if conn is None:
+                break
+            tried.add(conn)
+            stream, why = self._try_open_stream(conn, dest_host, dest_port, timeout)
+            if stream is not None:
+                return stream
+            errors.append(f"{conn.node_id_hex()}: {why}")
+        if not tried:
             raise RelayTimeout("no node connections available")
+        raise RelayTimeout(f"stream open to {dest_host}:{dest_port} failed on "
+                           f"{len(tried)} node(s): " + "; ".join(errors))
+
+    def _try_open_stream(self, conn: NodeConnection, dest_host: str, dest_port: int,
+                         timeout: float):
+        """One attempt on one node; returns (stream, None) or (None, reason)."""
         stream_id = os.urandom(8)
         stream = ClientStream(self, conn, stream_id, dest_host, dest_port)
         pending = _PendingOpen()
@@ -348,10 +369,12 @@ class VPNClient:
             self._selector.record_failure(conn, dest_host)
             why = ("no answer from node (an outdated node build ignores stream messages; "
                    "update the server: deploy/update_server.sh)"
-                   if not answered else pending.text.decode("utf-8", "replace"))
-            raise RelayTimeout(f"stream open to {dest_host}:{dest_port} failed: {why}")
+                   if not answered else
+                   "node could not connect to the destination: "
+                   + pending.text.decode("utf-8", "replace"))
+            return None, why
         self._selector.record_success(conn, 0.0, 0)
-        return stream
+        return stream, None
 
     def _close_client_stream(self, stream: ClientStream, notify_peer: bool) -> None:
         with self._lock:

@@ -193,6 +193,49 @@ class TestStreamingRelay(unittest.TestCase):
         self.assertGreater(self.node.score(), 0)  # receipts issued for streams
 
 
+class TestFailover(unittest.TestCase):
+    """A node that cannot serve a destination is skipped in favour of one that can."""
+
+    def setUp(self):
+        self.server = DialogueServer()
+        # Node A: exit disabled (stands in for "this node's network blocks the site").
+        self.node_a = RelayNode(bind_host="127.0.0.1", advertised_host="127.0.0.1",
+                                exit_enabled=False)
+        self.node_b = RelayNode(bind_host="127.0.0.1", advertised_host="127.0.0.1")
+        self.node_a.start()
+        self.node_b.start()
+        self.client = VPNClient(bind_host="127.0.0.1")
+        self.client.start()
+        for n in (self.node_a, self.node_b):
+            self.client.connect(n.identity.x_public, n.address,
+                                expected_node_ed=n.identity.ed_public)
+
+    def tearDown(self):
+        self.client.stop()
+        self.node_a.stop()
+        self.node_b.stop()
+        self.server.stop()
+
+    def test_failover_to_working_node_and_stays_pinned(self):
+        # Force the first choice onto the broken node, as bad luck would.
+        conn_a = next(c for c in self.client.connections()
+                      if c.node_ed_public == self.node_a.identity.ed_public)
+        self.client._selector._pins.clear()
+        from spacecop.client.multipath import _Pin
+        self.client._selector._pins[self.server.host] = _Pin(conn_a, time.monotonic())
+
+        s = self.client.open_stream(self.server.host, self.server.port, timeout=8)
+        self.assertEqual(s.conn.node_ed_public, self.node_b.identity.ed_public)
+        buf = bytearray()
+        s.send(b"ping 1\n")
+        self.assertEqual(_readline(s, buf), b"pong 1")
+        s.close()
+        # The site is now pinned to the node that worked.
+        pinned = self.client._selector.pinned_node(self.server.host)
+        self.assertEqual(pinned.node_ed_public, self.node_b.identity.ed_public)
+        self.assertEqual(self.node_a.relayed_requests, 0)
+
+
 class TestSocksStreaming(unittest.TestCase):
     def setUp(self):
         self.server = DialogueServer()

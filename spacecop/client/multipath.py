@@ -60,7 +60,7 @@ def site_key(host: str) -> str:
     return ".".join(labels[-2:])
 
 
-@dataclass
+@dataclass(eq=False)  # identity semantics: usable in sets, compared by object
 class NodeConnection:
     session: Session
     addr: Address
@@ -112,10 +112,18 @@ class NodeSelector:
                 del self._pins[key]
 
     # -- selection ----------------------------------------------------------
-    def choose(self, dest_host: Optional[str] = None) -> Optional[NodeConnection]:
-        """Pick a node; the same site always gets the same node while healthy."""
+    def choose(self, dest_host: Optional[str] = None,
+               exclude: Optional[set] = None) -> Optional[NodeConnection]:
+        """Pick a node; the same site always gets the same node while healthy.
+
+        ``exclude`` lists nodes that already failed for this destination (used
+        for failover): they are skipped, and a pin pointing at one of them is
+        replaced.
+        """
+        exclude = exclude or set()
         with self._lock:
-            if not self._conns:
+            candidates = [c for c in self._conns if c not in exclude]
+            if not candidates:
                 return None
             now = time.monotonic()
             key = site_key(dest_host) if dest_host else None
@@ -123,23 +131,28 @@ class NodeSelector:
             if key is not None:
                 pin = self._pins.get(key)
                 if pin is not None:
-                    if pin.conn in self._conns and now - pin.last_used <= self.pin_idle_ttl:
+                    if (pin.conn in candidates
+                            and now - pin.last_used <= self.pin_idle_ttl):
                         pin.last_used = now
                         return pin.conn
                     del self._pins[key]
 
-            conn = self._pick_unpinned()
+            conn = self._pick_unpinned(candidates)
             if key is not None:
                 self._pins[key] = _Pin(conn=conn, last_used=now)
             return conn
 
-    def _pick_unpinned(self) -> NodeConnection:
-        if len(self._conns) == 1:
-            return self._conns[0]
+    def _pick_unpinned(self, candidates: List[NodeConnection]) -> NodeConnection:
+        if len(candidates) == 1:
+            return candidates[0]
         # Epsilon-greedy: mostly exploit the best node, sometimes explore.
         if _sysrandom.random() < self.epsilon:
-            return _sysrandom.choice(self._conns)
-        return max(self._conns, key=lambda c: c.health_score())
+            return _sysrandom.choice(candidates)
+        return max(candidates, key=lambda c: c.health_score())
+
+    def node_count(self) -> int:
+        with self._lock:
+            return len(self._conns)
 
     def pinned_node(self, dest_host: str) -> Optional[NodeConnection]:
         with self._lock:

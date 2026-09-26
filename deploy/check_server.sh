@@ -87,6 +87,24 @@ if command -v timedatectl >/dev/null; then
   fi
 fi
 
+# 5b. exit reachability: can THIS server reach popular destinations?  A node
+#     whose network blocks a service cannot relay it, however healthy it is.
+if [[ -n "$PY" ]]; then
+  "$PY" - <<'EOF'
+import socket
+targets = [("example.com", 443, "generic HTTPS"),
+           ("149.154.167.51", 443, "Telegram DC2"),
+           ("149.154.175.53", 443, "Telegram DC4")]
+for host, port, label in targets:
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+        print(f"  \033[1;32m[OK]\033[0m   exit can reach {label} ({host}:{port})")
+    except OSError as exc:
+        print(f"  \033[1;33m[WARN]\033[0m exit CANNOT reach {label} ({host}:{port}): {exc} "
+              f"-- clients will fail over to another node for it, if one is configured")
+EOF
+fi
+
 # 6. URI
 if [[ -n "$PY" && -f "$IDENTITY" && -n "$ADVERTISE" ]]; then
   URI="$(cd "$INSTALL_DIR" && "$PY" -m spacecop.cli uri --identity "$IDENTITY" --host "$ADVERTISE" --port "$PORT" 2>/dev/null || true)"
