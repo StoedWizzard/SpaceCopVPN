@@ -133,7 +133,7 @@ python -m spacecop.cli gui
 python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-101 tests cover the crypto (against RFC 8439/7748/5869 vectors and OpenSSL), the
+108 tests cover the crypto (against RFC 8439/7748/5869 vectors and OpenSSL), the
 handshake and session layer, replay protection, fragmentation and reassembly,
 the scoring ledger and proof-of-work, connection URIs and identity persistence,
 full end-to-end relaying over real UDP/TCP sockets, streaming (multi-round-trip

@@ -66,12 +66,27 @@ class FileDescriptorTun(TunInterface):
 # Entry point called from the Android app (Chaquopy)
 # ---------------------------------------------------------------------------
 _active = {}
+LOG_KEEP = 300
+
+
+def _call_log(log, text: str) -> None:
+    """Deliver a log line to ``log``: a Python callable, or a Java/Kotlin object
+    with a ``log(String)`` method (Chaquopy proxies are not callable)."""
+    if log is None:
+        return
+    try:
+        method = getattr(log, "log", None)
+        if callable(method):
+            method(text)
+        elif callable(log):
+            log(text)
+    except Exception:
+        pass
 
 
 def set_socket_protector(protector) -> None:
     """Register the VpnService's protect(fd) so the tunnel's own UDP socket
     bypasses the tunnel.  ``protector`` is any object with ``protectFd(int)``."""
-    from .. import transport
     from ..transport import udp as _udp
 
     def hook(fd: int) -> None:
@@ -82,28 +97,54 @@ def set_socket_protector(protector) -> None:
     _udp.socket_created_hook = hook
 
 
+def node_table(client) -> list:
+    """Per-node competition stats (same shape as SystemVPN.node_table())."""
+    rows = []
+    for conn in client._selector.ranking():
+        rows.append({
+            "id": conn.node_id_hex(),
+            "addr": f"{conn.addr[0]}:{conn.addr[1]}",
+            "requests": conn.requests,
+            "failures": conn.failures,
+            "latency_ms": round(conn.ewma_latency * 1000) if conn.ewma_latency else None,
+            "health": round(conn.health_score(), 1),
+            "bytes": conn.bytes_served,
+        })
+    return rows
+
+
 def run_engine(fd: int, uris: list, dns: str = "1.1.1.1:53", discover: bool = True,
                log=None) -> dict:
     """Start the VPN on the file descriptor from ``VpnService`` (non-blocking).
 
-    ``uris`` — connection strings ``spacecop://…``.  Returns a dict with a
-    ``stop()`` callable and a ``status()`` callable.  Log lines go to ``log``
-    (a Java/Kotlin callback or Python callable) if given.
+    ``uris`` — connection strings ``spacecop://…``.  Returns a dict with
+    ``stop()``, ``status()`` (dict), ``status_json()`` (JSON string incl. the
+    node table) and ``log_text()`` (last lines).  Log lines also go to ``log``
+    (a Java/Kotlin object with ``log(String)``, or a Python callable).
     """
+    import collections
+    import json
+    import threading
+    import time
+
     from ..client import VPNClient
     from ..protocol.uri import parse_uri
     from .engine import PacketEngine
 
+    lines = collections.deque(maxlen=LOG_KEEP)
+    lock = threading.Lock()
+
     def emit(text):
-        if log is not None:
-            try:
-                log(text)
-            except Exception:
-                pass
+        stamp = time.strftime("%H:%M:%S")
+        with lock:
+            lines.append(f"{stamp} {text}")
+        _call_log(log, text)
 
     client = VPNClient(discovery_enabled=discover, on_event=emit)
     client.start()
     ok = 0
+    uris = [str(u).strip() for u in uris if str(u).strip()]
+    emit(f"connecting to {len(uris)} node(s)…")
     for text in uris:
         try:
             t = parse_uri(text)
@@ -114,19 +155,22 @@ def run_engine(fd: int, uris: list, dns: str = "1.1.1.1:53", discover: bool = Tr
             emit(f"node {text[:40]}…: {exc}")
     if ok == 0:
         client.stop()
-        raise RuntimeError("no node answered")
+        raise RuntimeError("ни один узел не ответил (проверьте строку подключения и интернет)")
 
     host, _, port = dns.rpartition(":")
     tun = FileDescriptorTun(fd, mtu=1400, close_fd=False)
     engine = PacketEngine(tun, client, gateway_ip="10.77.0.1",
                           dns_server=(host or "1.1.1.1", int(port or 53)), on_event=emit)
     engine.start()
-    emit("packet engine running")
+    emit("packet engine running — весь трафик идёт через VPN")
 
     def stop():
-        engine.stop()
-        client.stop()
+        try:
+            engine.stop()
+        finally:
+            client.stop()
         _active.pop(fd, None)
+        emit("stopped")
 
     def status():
         return {
@@ -137,9 +181,21 @@ def run_engine(fd: int, uris: list, dns: str = "1.1.1.1:53", discover: bool = Tr
             "dns": engine.dns_queries,
             "up": engine.bytes_up,
             "down": engine.bytes_down,
+            "table": node_table(client),
         }
 
-    handle = {"stop": stop, "status": status}
+    def status_json():
+        try:
+            return json.dumps(status())
+        except Exception as exc:  # never let the UI poller die
+            return json.dumps({"error": str(exc)})
+
+    def log_text():
+        with lock:
+            return "\n".join(lines)
+
+    handle = {"stop": stop, "status": status, "status_json": status_json,
+              "log_text": log_text}
     _active[fd] = handle
     return handle
 

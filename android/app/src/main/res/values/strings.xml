@@ -2,11 +2,22 @@
 <resources>
     <string name="app_name">SpaceCopVPN</string>
     <string name="status_off">● отключено</string>
+    <string name="status_connecting">● подключение…</string>
     <string name="status_on">● подключено — весь трафик через VPN</string>
     <string name="nodes_title">Узлы</string>
     <string name="nodes_hint">Вставьте строки подключения spacecop://… (по одной на строку). Одного узла достаточно — остальные подтянутся автообнаружением.</string>
+    <string name="dns_label">DNS</string>
     <string name="discover">Автообнаружение узлов</string>
     <string name="connect">Подключиться</string>
     <string name="disconnect">Отключиться</string>
     <string name="need_uri">Добавьте хотя бы одну строку spacecop://…</string>
+    <string name="vpn_denied">Вы не разрешили создать VPN. Нажмите «Подключиться» ещё раз и подтвердите запрос.</string>
+    <string name="stats_title">Статистика</string>
+    <string name="stats_idle">VPN не запущен.</string>
+    <string name="stats_fmt">Узлов: %1$d · соединений: %2$d · открыто %3$d (ошибок %4$d) · DNS: %5$d\n↑ %6$s · ↓ %7$s</string>
+    <string name="competition_title">Конкуренция узлов</string>
+    <string name="nodes_idle">Пока нет данных. ★ — лидер: по нему идёт больше всего трафика.</string>
+    <string name="log_title">Журнал</string>
+    <string name="log_clear">Очистить</string>
+    <string name="log_empty">Здесь появятся сообщения о подключении и ошибки.</string>
 </resources>

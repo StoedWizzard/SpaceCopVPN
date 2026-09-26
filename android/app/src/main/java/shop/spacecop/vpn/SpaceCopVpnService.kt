@@ -12,7 +12,22 @@ import android.util.Log
 import com.chaquo.python.PyObject
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
-import java.io.FileDescriptor
+import java.text.SimpleDateFormat
+import java.util.ArrayDeque
+import java.util.Date
+import java.util.Locale
+
+/** Receives log lines from Python (Chaquopy calls the public `log` method). */
+class PyLogger {
+    fun log(line: String) {
+        SpaceCopVpnService.appendLog(line)
+    }
+}
+
+/** Lets Python mark its UDP socket as "outside the tunnel" (VpnService.protect). */
+class SocketProtector(private val service: VpnService) {
+    fun protectFd(fd: Int): Boolean = service.protect(fd)
+}
 
 /**
  * Full-system VPN: obtains the TUN file descriptor from Android and hands it to
@@ -29,13 +44,33 @@ class SpaceCopVpnService : VpnService() {
         const val EXTRA_DISCOVER = "discover"
         private const val CHANNEL = "spacecop_vpn"
         private const val TAG = "SpaceCopVPN"
+        private const val LOG_KEEP = 300
 
-        @Volatile var running: Boolean = false
-        @Volatile var lastLog: String = ""
+        /** "off", "connecting", "on" — read by the activity. */
+        @Volatile var state: String = "off"
+        /** Last status JSON from the engine (nodes, connections, traffic, table). */
+        @Volatile var statusJson: String = ""
+
+        private val logLines = ArrayDeque<String>()
+        private val stamp = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+        fun appendLog(line: String) {
+            val text = stamp.format(Date()) + " " + line
+            synchronized(logLines) {
+                logLines.addLast(text)
+                while (logLines.size > LOG_KEEP) logLines.removeFirst()
+            }
+            Log.i(TAG, line)
+        }
+
+        fun logText(): String = synchronized(logLines) { logLines.joinToString("\n") }
+
+        fun clearLog() = synchronized(logLines) { logLines.clear() }
     }
 
     private var tun: ParcelFileDescriptor? = null
     private var handle: PyObject? = null
+    private var poller: Thread? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -51,7 +86,10 @@ class SpaceCopVpnService : VpnService() {
     }
 
     private fun startVpn(uris: List<String>, dns: String, discover: Boolean) {
-        if (running) return
+        if (state != "off") return
+        state = "connecting"
+        clearLog()
+        appendLog("запуск VPN…")
         startForeground(1, buildNotification("Подключение…"))
 
         val builder = Builder()
@@ -65,51 +103,67 @@ class SpaceCopVpnService : VpnService() {
         // leave through the real network (also covered by protect() below).
         try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
 
-        val pfd = builder.establish() ?: run { stopSelf(); return }
+        val pfd = builder.establish()
+        if (pfd == null) {
+            appendLog("ошибка: система не дала создать VPN-интерфейс (нет разрешения?)")
+            state = "off"
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
         tun = pfd
-
-        if (!Python.isStarted()) Python.start(AndroidPlatform(this))
-        val py = Python.getInstance()
-
-        // Python sockets must be protect()ed: expose a callback the client uses
-        // right after creating its UDP socket.
-        val protector = object : Any() {
-            @Suppress("unused")
-            fun protectFd(fd: Int): Boolean = protect(fd)
-        }
-        py.getModule("spacecop.tun.android").callAttr("set_socket_protector", protector)
-
-        val logger = object : Any() {
-            @Suppress("unused")
-            fun log(line: String) { lastLog = line; Log.i(TAG, line) }
-        }
+        appendLog("VPN-интерфейс создан (10.77.0.2/24, DNS 10.77.0.1)")
 
         Thread {
             try {
-                handle = py.getModule("spacecop.tun.android").callAttr(
-                    "run_engine", pfd.fd, uris.toTypedArray(), dns, discover, logger
-                )
-                running = true
-                updateNotification("Подключено · ${uris.size} узл.")
+                if (!Python.isStarted()) Python.start(AndroidPlatform(this))
+                val py = Python.getInstance()
+                val mod = py.getModule("spacecop.tun.android")
+                // Python sockets must be protect()ed: expose a callback the client
+                // uses right after creating its UDP socket.
+                mod.callAttr("set_socket_protector", SocketProtector(this))
+                val h = mod.callAttr("run_engine", pfd.fd, uris.toTypedArray(), dns, discover, PyLogger())
+                handle = h
+                state = "on"
+                updateNotification("Подключено · узлов: ${uris.size}")
+                startPoller(h)
             } catch (e: Exception) {
                 Log.e(TAG, "engine failed", e)
-                lastLog = "ошибка: ${e.message}"
+                appendLog("ошибка: " + ((e.message ?: "").lines().lastOrNull { it.isNotBlank() } ?: e.toString()))
                 stopVpn()
             }
         }.start()
     }
 
+    private fun startPoller(h: PyObject) {
+        val t = Thread {
+            while (state == "on" && handle === h) {
+                try {
+                    statusJson = h.callAttr("__getitem__", "status_json").call().toString()
+                } catch (_: Exception) {}
+                try { Thread.sleep(1000) } catch (_: InterruptedException) { break }
+            }
+        }
+        t.isDaemon = true
+        poller = t
+        t.start()
+    }
+
     private fun stopVpn() {
-        try { handle?.callAttr("__getitem__", "stop")?.call() } catch (_: Exception) {}
+        val h = handle
         handle = null
+        state = "off"
+        poller?.interrupt(); poller = null
+        try { h?.callAttr("__getitem__", "stop")?.call() } catch (_: Exception) {}
         try { tun?.close() } catch (_: Exception) {}
         tun = null
-        running = false
+        statusJson = ""
+        appendLog("VPN остановлен")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    override fun onDestroy() { stopVpn(); super.onDestroy() }
+    override fun onDestroy() { if (state != "off") stopVpn(); super.onDestroy() }
     override fun onRevoke() { stopVpn(); super.onRevoke() }
 
     private fun buildNotification(text: String): Notification {
@@ -121,8 +175,9 @@ class SpaceCopVpnService : VpnService() {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return Notification.Builder(this, CHANNEL)
-            .setContentTitle("SpaceCopVPN")
+        val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            Notification.Builder(this, CHANNEL) else @Suppress("DEPRECATION") Notification.Builder(this)
+        return b.setContentTitle("SpaceCopVPN")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(open)

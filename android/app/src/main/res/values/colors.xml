@@ -8,5 +8,6 @@
     <color name="muted">#8B90B5</color>
     <color name="accent">#7C5CFF</color>
     <color name="ok">#3DDC97</color>
+    <color name="warn">#FFC857</color>
     <color name="err">#FF5C7A</color>
 </resources>
