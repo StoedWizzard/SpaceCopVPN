@@ -105,6 +105,18 @@ a UAC prompt; SOCKS5 mode needs no rights (point Windows' proxy settings at
 `127.0.0.1:1080`). Built by PyInstaller in CI; no install needed. See
 `packaging/windows/README.md`.
 
+### Graphical client (Ubuntu / Debian)
+
+```
+./packaging/install_client_ubuntu.sh    # builds a .deb and installs it (or --user)
+spacecop-gui                            # or "SpaceCopVPN" in the app menu
+```
+
+Installs the client and CLI, compiles the C crypto library, and pulls the
+dependencies (`python3-tk`, `policykit-1` for whole-system mode). To build just
+the package: `packaging/debian/build_deb.sh` produces
+`spacecopvpn_<version>_amd64.deb` (`sudo apt install ./…deb`).
+
 ### Graphical client (Arch Linux)
 
 ```

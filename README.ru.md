@@ -103,6 +103,18 @@ UAC заворачивает весь трафик в оверлей; режим
 (укажите в настройках прокси Windows `127.0.0.1:1080`). Собирается
 PyInstaller в CI, установка не нужна. Подробнее — `packaging/windows/README.md`.
 
+### Клиент с интерфейсом (Ubuntu / Debian)
+
+```
+./packaging/install_client_ubuntu.sh     # соберёт .deb и установит; или --user
+spacecop-gui                             # либо «SpaceCopVPN» в меню приложений
+```
+
+Ставит клиент и CLI, собирает C-библиотеку шифрования, тянет зависимости
+(`python3-tk`, `policykit-1` для режима «Вся система»). Готовый пакет можно
+собрать отдельно: `packaging/debian/build_deb.sh` создаёт
+`spacecopvpn_<версия>_amd64.deb`, ставится как `sudo apt install ./…deb`.
+
 ### Клиент с интерфейсом (Arch Linux)
 
 ```
