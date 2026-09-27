@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SpaceCopVPN
+Name[ru]=SpaceCopVPN
+GenericName=VPN Client
+GenericName[ru]=VPN-клиент
+Comment=Decentralised VPN client: connect to nodes and run a local SOCKS5 tunnel
+Comment[ru]=Децентрализованный VPN-клиент: подключение к узлам и локальный SOCKS5-туннель
+Exec=spacecop-gui
+Icon=network-vpn
+Terminal=false
+Categories=Network;Security;
+Keywords=vpn;proxy;socks;privacy;
+Keywords[ru]=vpn;впн;прокси;socks;приватность;
+StartupNotify=true
