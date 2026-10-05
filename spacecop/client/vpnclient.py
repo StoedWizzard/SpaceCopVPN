@@ -82,7 +82,7 @@ class ClientStream:
     """A TCP connection to ``dest`` carried through a node, with a socket-like API.
 
     ``send(data)`` blocks while the send window is full; ``recv()`` blocks until
-    bytes arrive and returns ``b""" at EOF; ``close()`` tears the stream down
+    bytes arrive and returns ``b""`` at EOF; ``close()`` tears the stream down
     and, if any bytes were carried, hands the node a signed receipt.
     """
 
@@ -286,6 +286,8 @@ class VPNClient:
 
         request_id = os.urandom(8)
         pending = _PendingRequest()
+        with self._lock:
+            self._pending_handshakes.pop(request_id, None) if False else None
         with self._lock:
             self._pending_requests[request_id] = pending
 
