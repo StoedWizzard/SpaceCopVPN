@@ -287,8 +287,6 @@ class VPNClient:
         request_id = os.urandom(8)
         pending = _PendingRequest()
         with self._lock:
-            self._pending_handshakes.pop(request_id, None) if False else None
-        with self._lock:
             self._pending_requests[request_id] = pending
 
         req = RelayRequest(request_id, dest_host, dest_port, blob).encode()
