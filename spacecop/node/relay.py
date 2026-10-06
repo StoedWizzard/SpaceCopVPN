@@ -30,6 +30,7 @@ from ..protocol import (
     constants as c,
     framing,
 )
+from ..protocol.handshake import SESSION_ID_SIZE
 from ..protocol.messages import (
     DataMessage,
     NodeAnnounce,
@@ -73,6 +74,10 @@ class _SessionState:
     reassembler: Reassembler = field(default_factory=Reassembler)
     last_active: float = field(default_factory=time.monotonic)
     streams: Dict[bytes, "_NodeStream"] = field(default_factory=dict)
+    # Kept so a retransmitted INIT (lossy client link) gets the stored RESP
+    # re-sent instead of rotating the session keys out from under the client.
+    client_eph: bytes = b""    # client ephemeral X25519 pub from the INIT
+    resp_frame: bytes = b""    # the RESP frame we answered with
 
 
 @dataclass
@@ -214,6 +219,26 @@ class RelayNode:
             self.transport.send(framing.encode_frame(c.MSG_PONG, pong), addr)
 
     def _handle_handshake(self, body: bytes, addr: Address) -> None:
+        # A client behind a lossy link re-sends its INIT every second until a
+        # RESP arrives.  Re-processing such a duplicate would rotate the
+        # session keys and desynchronise a client that already accepted the
+        # first RESP (handshake "succeeds", then every stream times out).
+        # An exact duplicate — same session id AND same client ephemeral —
+        # therefore gets the stored RESP re-sent; only a different ephemeral
+        # under a recycled id is treated as a new handshake.
+        sid = body[:SESSION_ID_SIZE] if len(body) >= SESSION_ID_SIZE else b""
+        client_eph = (body[SESSION_ID_SIZE:SESSION_ID_SIZE + c.KEY_SIZE]
+                      if len(body) >= SESSION_ID_SIZE + c.KEY_SIZE else b"")
+        if sid:
+            with self._lock:
+                existing = self._sessions.get(sid)
+            if (existing is not None and existing.client_eph == client_eph
+                    and existing.resp_frame):
+                try:
+                    self.transport.send(existing.resp_frame, addr)
+                except OSError:
+                    pass
+                return
         try:
             resp_frame, session = self._handshaker.handle_init(body)
         except Exception as exc:
@@ -228,7 +253,14 @@ class RelayNode:
                 pass
             return
         with self._lock:
-            self._sessions[session.session_id] = _SessionState(session=session, addr=addr)
+            old = self._sessions.get(session.session_id)
+            self._sessions[session.session_id] = _SessionState(
+                session=session, addr=addr,
+                client_eph=client_eph, resp_frame=resp_frame)
+        if old is not None:
+            # A recycled session id (new client ephemeral): retire its streams.
+            for ns in list(old.streams.values()):
+                self._close_node_stream(old, ns, notify_peer=False)
         self.transport.send(resp_frame, addr)
 
     def _handle_data(self, body: bytes, addr: Address) -> None:
