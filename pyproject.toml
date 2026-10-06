@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spacecopvpn"
-version = "0.3.3"
+version = "0.3.4"
 description = "A from-scratch, decentralised, incentivised VPN protocol (stdlib + optional C crypto)"
 readme = "README.md"
 requires-python = ">=3.8"

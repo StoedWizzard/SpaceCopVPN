@@ -12,8 +12,8 @@ android {
         applicationId = "shop.spacecop.vpn"
         minSdk = 24
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.3.3"
+        versionCode = 7
+        versionName = "0.3.4"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     // Native ChaCha20-Poly1305 (native/spacecop_crypto.c) — loaded by Python
