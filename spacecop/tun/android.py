@@ -141,6 +141,11 @@ def run_engine(fd: int, uris: list, dns: str = "1.1.1.1:53", discover: bool = Tr
         _call_log(log, text)
 
     client = VPNClient(discovery_enabled=discover, on_event=emit)
+    # Cellular links punish IP fragmentation: the default 20 KB fragments are
+    # split into ~15 IP packets each and losing any one kills the datagram.
+    # 1200 B keeps every datagram inside the tunnel MTU.  Reassembly keys on
+    # count/index, not size, so this needs no protocol change on the node.
+    client.fragmenter.fragment_size = 1200
     client.start()
     ok = 0
     uris = [str(u).strip() for u in uris if str(u).strip()]
@@ -168,8 +173,14 @@ def run_engine(fd: int, uris: list, dns: str = "1.1.1.1:53", discover: bool = Tr
         conns = client.connections()
         emit(f"self-test: {len(conns)} node(s) known")
         for cn in conns:
-            ver = getattr(cn, "version", "") or "old (<0.2, no streams)"
-            emit(f"  node {cn.addr[0]}:{cn.addr[1]} version {ver}")
+            # Really probe the node: PONG carries the software version, so the
+            # log shows the truth instead of a guess.
+            rtt, ver = client.probe(cn.addr, timeout=2.0, attempts=2)
+            if rtt is None:
+                emit(f"  node {cn.addr[0]}:{cn.addr[1]}: no PONG — unreachable right now")
+            else:
+                emit(f"  node {cn.addr[0]}:{cn.addr[1]}: version "
+                     f"{ver or 'old (<0.2, no streams)'}, rtt {rtt * 1000:.0f} ms")
         try:
             s = client.open_stream(dns_host, dns_port, timeout=8.0)
             s.close()
