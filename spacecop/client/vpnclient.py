@@ -197,34 +197,54 @@ class VPNClient:
     def connect(self, node_x_public: bytes, addr: Address,
                 expected_node_ed: bytes = b"", timeout: float = 5.0) -> NodeConnection:
         """Perform a handshake with a node and register the resulting session."""
-        handshake = ClientHandshake(node_x_public, expected_node_ed_pub=expected_node_ed)
-        pending = _PendingHandshake(handshake=handshake, addr=addr)
-        with self._lock:
-            self._pending_handshakes[handshake.session_id] = pending
-
-        # Re-send the INIT every second until we get an answer: a single lost
-        # UDP datagram must not turn into a "node unreachable" verdict.  The
-        # INIT carries a timestamp, so each copy is rebuilt fresh.
+        # Every retransmit uses a FRESH handshake (new session id and fresh
+        # ephemeral keys), never the same INIT twice.  Re-sending an identical
+        # INIT is unsafe on lossy links — mobile networks in particular: a node
+        # processes every INIT it receives, and a stale RESP from an earlier
+        # attempt can arrive after a later INIT rotated the session, leaving
+        # the two ends with mismatched keys.  The handshake then "succeeds" but
+        # every stream times out ("no answer from node").  With fresh attempts
+        # each RESP the node sends is self-consistent, and the first one that
+        # verifies wins.  This works against old nodes too — no wire change.
         deadline = time.monotonic() + timeout
-        answered = False
-        while time.monotonic() < deadline:
-            self.transport.send(handshake.build_init(), addr)
-            if pending.event.wait(min(1.0, max(0.05, deadline - time.monotonic()))):
-                answered = True
-                break
+        attempts: List[_PendingHandshake] = []
+        answered: Optional[_PendingHandshake] = None
+        try:
+            while time.monotonic() < deadline:
+                handshake = ClientHandshake(node_x_public, expected_node_ed_pub=expected_node_ed)
+                pending = _PendingHandshake(handshake=handshake, addr=addr)
+                with self._lock:
+                    self._pending_handshakes[handshake.session_id] = pending
+                attempts.append(pending)
+                try:
+                    self.transport.send(handshake.build_init(), addr)
+                except OSError:
+                    pass
+                # Wait ~1s for a RESP to ANY outstanding attempt (an earlier
+                # INIT's answer may arrive first), then retransmit.
+                wait_until = min(time.monotonic() + 1.0, deadline)
+                while time.monotonic() < wait_until:
+                    answered = next((p for p in attempts if p.event.is_set()), None)
+                    if answered is not None:
+                        break
+                    time.sleep(0.05)
+                if answered is not None:
+                    break
 
-        if not answered:
+            if answered is None:
+                raise RelayTimeout(
+                    "handshake timed out: no reply from the node "
+                    "(node not running, UDP port blocked by a firewall/provider, or wrong host:port)")
+
+            session = answered.session
+            if session is None:
+                raise HandshakeError(
+                    answered.error or "node response failed verification "
+                                     "(wrong key, wrong identity, or tampering)")
+        finally:
             with self._lock:
-                self._pending_handshakes.pop(handshake.session_id, None)
-            raise RelayTimeout(
-                "handshake timed out: no reply from the node "
-                "(node not running, UDP port blocked by a firewall/provider, or wrong host:port)")
-
-        session = pending.session
-        if session is None:
-            raise HandshakeError(
-                pending.error or "node response failed verification "
-                                 "(wrong key, wrong identity, or tampering)")
+                for p in attempts:
+                    self._pending_handshakes.pop(p.handshake.session_id, None)
         conn = NodeConnection(session=session, addr=addr,
                               node_ed_public=session.peer_identity,
                               x_public=node_x_public)
